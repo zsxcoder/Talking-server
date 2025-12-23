@@ -1,8 +1,118 @@
 var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// src/utils.js
+var utils_exports = {};
+__export(utils_exports, {
+  getAllPosts: () => getAllPosts,
+  verifySession: () => verifySession
+});
+async function verifySession(request, env) {
+  const cookieHeader = request.headers.get("Cookie");
+  if (!cookieHeader) {
+    console.log("No cookie header found");
+    return false;
+  }
+  const cookies = {};
+  cookieHeader.split(";").forEach((cookie) => {
+    const [key, ...values] = cookie.trim().split("=");
+    if (key && values.length > 0) {
+      cookies[key] = values.join("=");
+    }
+  });
+  const sessionToken = cookies.session;
+  if (!sessionToken) {
+    console.log("No session token in cookies");
+    return false;
+  }
+  console.log("Found session token:", sessionToken.substring(0, 8) + "...");
+  const now = Date.now();
+  const lastUpdate = sessionUpdateCache.get(sessionToken) || 0;
+  const shouldUpdate = now - lastUpdate > 30 * 60 * 1e3;
+  try {
+    const sessionData = await env.POSTS_KV.get(`session:${sessionToken}`, "json");
+    if (sessionData && sessionData.username) {
+      const adminUsers = JSON.parse(env.ADMIN_USERS);
+      if (adminUsers.includes(sessionData.username)) {
+        console.log("Session valid for user:", sessionData.username);
+        if (shouldUpdate) {
+          console.log("Updating session timestamp");
+          sessionUpdateCache.set(sessionToken, now);
+          try {
+            await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
+              username: sessionData.username,
+              createdAt: sessionData.createdAt,
+              lastAccessed: now
+            }), {
+              expirationTtl: 604800
+              // 7 天
+            });
+          } catch (updateError) {
+            console.error("Error updating session:", updateError);
+          }
+        }
+        return { valid: true, username: sessionData.username, needsCookieUpdate: shouldUpdate };
+      } else {
+        console.log("User not in admin list:", sessionData.username);
+      }
+    } else {
+      console.log("No session data found or invalid format");
+    }
+  } catch (error) {
+    console.error("Session verification error:", error);
+  }
+  return false;
+}
+async function getAllPosts(kv) {
+  const now = Date.now();
+  if (postCache.data && now - postCache.timestamp < postCache.ttl) {
+    console.log("Returning cached posts, age:", (now - postCache.timestamp) / 1e3, "seconds");
+    return postCache.data;
+  }
+  console.log("Fetching fresh posts from KV");
+  const list = await kv.list({ prefix: "post:" });
+  const posts = [];
+  const promises = list.keys.map(async (key) => {
+    const postData = await kv.get(key.name, "json");
+    return postData;
+  });
+  const results = await Promise.all(promises);
+  results.forEach((postData) => {
+    if (postData) {
+      posts.push(postData);
+    }
+  });
+  posts.sort((a, b) => new Date(b.date) - new Date(a.date));
+  postCache.data = posts;
+  postCache.timestamp = now;
+  console.log("Fetched", posts.length, "posts from KV");
+  return posts;
+}
+var sessionUpdateCache, postCache;
+var init_utils = __esm({
+  "src/utils.js"() {
+    sessionUpdateCache = /* @__PURE__ */ new Map();
+    __name(verifySession, "verifySession");
+    postCache = {
+      data: null,
+      timestamp: 0,
+      ttl: 5 * 60 * 1e3
+      // 5分钟缓存
+    };
+    __name(getAllPosts, "getAllPosts");
+  }
+});
 
 // src/auth.js
-async function handleAuth(request, env) {
+async function handleAuth(request, env, dbWrapper3 = null) {
   const url = new URL(request.url);
   const path = url.pathname;
   if (path === "/auth/login") {
@@ -62,14 +172,18 @@ async function handleAuth(request, env) {
         return new Response(`\u65E0\u6743\u9650\u8BBF\u95EE\u3002\u5F53\u524D\u7528\u6237: ${username}`, { status: 403 });
       }
       const sessionToken = await generateSessionToken(username);
-      await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
-        username,
-        createdAt: Date.now(),
-        lastAccessed: Date.now()
-      }), {
-        expirationTtl: 604800
-        // 7 天后过期
-      });
+      if (dbWrapper3) {
+        await dbWrapper3.adapter.createSession(sessionToken, username);
+      } else {
+        await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
+          username,
+          createdAt: Date.now(),
+          lastAccessed: Date.now()
+        }), {
+          expirationTtl: 604800
+          // 7 天后过期
+        });
+      }
       const baseUrl = `${url.protocol}//${url.host}`;
       return new Response(null, {
         status: 302,
@@ -96,73 +210,8 @@ async function generateSessionToken(username) {
 }
 __name(generateSessionToken, "generateSessionToken");
 
-// src/utils.js
-async function verifySession(request, env) {
-  const cookieHeader = request.headers.get("Cookie");
-  if (!cookieHeader) {
-    console.log("No cookie header found");
-    return false;
-  }
-  const cookies = {};
-  cookieHeader.split(";").forEach((cookie) => {
-    const [key, ...values] = cookie.trim().split("=");
-    if (key && values.length > 0) {
-      cookies[key] = values.join("=");
-    }
-  });
-  const sessionToken = cookies.session;
-  if (!sessionToken) {
-    console.log("No session token in cookies");
-    return false;
-  }
-  console.log("Found session token:", sessionToken.substring(0, 8) + "...");
-  try {
-    const sessionData = await env.POSTS_KV.get(`session:${sessionToken}`, "json");
-    if (sessionData && sessionData.username) {
-      const adminUsers = JSON.parse(env.ADMIN_USERS);
-      if (adminUsers.includes(sessionData.username)) {
-        console.log("Session valid for user:", sessionData.username);
-        try {
-          await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
-            username: sessionData.username,
-            createdAt: sessionData.createdAt,
-            lastAccessed: Date.now()
-          }), {
-            expirationTtl: 604800
-            // 7 天
-          });
-          return { valid: true, username: sessionData.username, needsCookieUpdate: true };
-        } catch (updateError) {
-          console.error("Error updating session:", updateError);
-          return { valid: true, username: sessionData.username, needsCookieUpdate: false };
-        }
-      } else {
-        console.log("User not in admin list:", sessionData.username);
-      }
-    } else {
-      console.log("No session data found or invalid format");
-    }
-  } catch (error) {
-    console.error("Session verification error:", error);
-  }
-  return false;
-}
-__name(verifySession, "verifySession");
-async function getAllPosts(kv) {
-  const list = await kv.list({ prefix: "post:" });
-  const posts = [];
-  for (const key of list.keys) {
-    const postData = await kv.get(key.name, "json");
-    if (postData) {
-      posts.push(postData);
-    }
-  }
-  posts.sort((a, b) => new Date(b.date) - new Date(a.date));
-  return posts;
-}
-__name(getAllPosts, "getAllPosts");
-
 // src/api.js
+init_utils();
 async function handleAPI(request, env) {
   const url = new URL(request.url);
   if (url.pathname === "/api/posts" && request.method === "GET") {
@@ -181,6 +230,9 @@ async function handleAPI(request, env) {
   return new Response("\u672A\u627E\u5230", { status: 404 });
 }
 __name(handleAPI, "handleAPI");
+
+// src/admin.js
+init_utils();
 
 // src/storage.js
 async function uploadFile({ stream, key, contentType }, env) {
@@ -323,6 +375,7 @@ async function generateSignature(stringToSign, accessKeySecret) {
 __name(generateSignature, "generateSignature");
 
 // src/session-middleware.js
+init_utils();
 async function withSession(request, env, handler, requireAuth = true) {
   const url = new URL(request.url);
   const authResult = await verifySession(request, env);
@@ -675,7 +728,7 @@ function getThemeCSS() {
 __name(getThemeCSS, "getThemeCSS");
 
 // src/admin.js
-async function handleAdmin(request, env) {
+async function handleAdmin(request, env, dbWrapper3 = null) {
   const url = new URL(request.url);
   const path = url.pathname;
   return withSession(request, env, async (request2, env2, authResult) => {
@@ -687,7 +740,7 @@ async function handleAdmin(request, env) {
     }
     if (path === "/admin" || path === "/admin/") {
       if (request2.method === "GET") {
-        const posts = await getAllPosts(env2.POSTS_KV);
+        const posts = dbWrapper3 ? await dbWrapper3.getAllPosts() : await getAllPosts(env2.POSTS_KV);
         return createHTMLResponse(getAdminHTML(posts));
       }
       if (request2.method === "POST") {
@@ -697,7 +750,7 @@ async function handleAdmin(request, env) {
     if (path.startsWith("/admin/edit/")) {
       const postId = path.split("/").pop();
       if (request2.method === "GET") {
-        const postData = await env2.POSTS_KV.get(`post:${postId}`, "json");
+        const postData = dbWrapper3 ? await dbWrapper3.getPost(postId) : await env2.POSTS_KV.get(`post:${postId}`, "json");
         if (!postData) {
           return new Response("\u52A8\u6001\u672A\u627E\u5230", { status: 404 });
         }
@@ -709,7 +762,11 @@ async function handleAdmin(request, env) {
     }
     if (path.startsWith("/admin/delete/")) {
       const postId = path.split("/").pop();
-      await env2.POSTS_KV.delete(`post:${postId}`);
+      if (dbWrapper3) {
+        await dbWrapper3.deletePost(postId);
+      } else {
+        await env2.POSTS_KV.delete(`post:${postId}`);
+      }
       const baseUrl = `${url.protocol}//${url.host}`;
       return createRedirectResponse(`${baseUrl}/admin`);
     }
@@ -739,6 +796,36 @@ async function handleLogout(request, env) {
   });
 }
 __name(handleLogout, "handleLogout");
+async function cleanupOldPosts(kv, maxPosts = 20) {
+  try {
+    console.log("Checking post count, max allowed:", maxPosts);
+    const list = await kv.list({ prefix: "post:" });
+    const allPosts = [];
+    const promises = list.keys.map(async (key) => {
+      const postData = await kv.get(key.name, "json");
+      if (postData) {
+        allPosts.push({ ...postData, key: key.name });
+      }
+    });
+    await Promise.all(promises);
+    allPosts.sort((a, b) => new Date(b.date) - new Date(a.date));
+    if (allPosts.length > maxPosts) {
+      const postsToDelete = allPosts.slice(maxPosts);
+      console.log(`Cleaning up ${postsToDelete.length} old posts (keeping ${maxPosts} newest)`);
+      const deletePromises = postsToDelete.map((post) => {
+        console.log(`Deleting old post: ${post.id} from ${post.date}`);
+        return kv.delete(post.key);
+      });
+      await Promise.all(deletePromises);
+      console.log(`Successfully deleted ${postsToDelete.length} old posts`);
+    } else {
+      console.log(`Post count (${allPosts.length}) within limit (${maxPosts}), no cleanup needed`);
+    }
+  } catch (error) {
+    console.error("Error cleaning up old posts:", error);
+  }
+}
+__name(cleanupOldPosts, "cleanupOldPosts");
 async function handleCreatePost(request, env) {
   const formData = await request.formData();
   const content = formData.get("content");
@@ -776,7 +863,14 @@ ${content}`;
     tags,
     content: finalContent
   };
-  await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
+  if (!dbWrapper) {
+    await cleanupOldPosts(env.POSTS_KV, 20);
+  }
+  if (dbWrapper) {
+    await dbWrapper.createPost(postData);
+  } else {
+    await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
+  }
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
   return createRedirectResponse(`${baseUrl}/admin`);
@@ -787,7 +881,7 @@ async function handleUpdatePost(request, env, postId) {
   const content = formData.get("content");
   const tags = formData.get("tags").split(",").map((tag) => tag.trim()).filter(Boolean);
   const image = formData.get("image");
-  const existingPost = await env.POSTS_KV.get(`post:${postId}`, "json");
+  const existingPost = dbWrapper ? await dbWrapper.getPost(postId) : await env.POSTS_KV.get(`post:${postId}`, "json");
   if (!existingPost) {
     return new Response("\u52A8\u6001\u672A\u627E\u5230", { status: 404 });
   }
@@ -821,7 +915,11 @@ ${content}`;
     content: finalContent,
     updatedAt: (/* @__PURE__ */ new Date()).toLocaleString("sv-SE").replace("T", " ").slice(0, 19)
   };
-  await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
+  if (dbWrapper) {
+    await dbWrapper.updatePost(postId, updatedPost);
+  } else {
+    await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
+  }
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
   return createRedirectResponse(`${baseUrl}/admin`);
@@ -1780,7 +1878,8 @@ function getEditHTML(post) {
 __name(getEditHTML, "getEditHTML");
 
 // src/public.js
-async function handlePublic(request, env) {
+init_utils();
+async function handlePublic(request, env, dbWrapper3 = null) {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/images/")) {
     const imageKey = url.pathname.replace("/images/", "");
@@ -1800,7 +1899,7 @@ async function handlePublic(request, env) {
       }
     });
   }
-  const posts = await getAllPosts(env.POSTS_KV);
+  const posts = dbWrapper3 ? await dbWrapper3.getAllPosts() : await getAllPosts(env.POSTS_KV);
   return new Response(getPublicHTML(posts), {
     headers: { "Content-Type": "text/html; charset=utf-8" }
   });
@@ -2092,7 +2191,451 @@ function getPublicHTML(posts) {
 }
 __name(getPublicHTML, "getPublicHTML");
 
+// src/database.js
+var NeonDatabase = class {
+  static {
+    __name(this, "NeonDatabase");
+  }
+  constructor(env) {
+    this.env = env;
+    this.connectionString = env.DATABASE_URL;
+    this.pool = null;
+  }
+  async initialize() {
+    try {
+      console.log("Initializing Neon PostgreSQL connection...");
+      const { Pool } = await import("pg");
+      this.pool = new Pool({
+        connectionString: this.connectionString,
+        ssl: { rejectUnauthorized: false },
+        max: 20,
+        // 连接池大小
+        idleTimeoutMillis: 3e4,
+        connectionTimeoutMillis: 1e4
+      });
+      const client = await this.pool.connect();
+      await client.query("SELECT 1");
+      client.release();
+      console.log("Neon PostgreSQL initialized successfully");
+      await this.initializeTables();
+    } catch (error) {
+      console.error("Failed to initialize Neon database:", error);
+      throw error;
+    }
+  }
+  async initializeTables() {
+    const client = await this.pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id VARCHAR(50) PRIMARY KEY,
+          title VARCHAR(200),
+          content TEXT,
+          tags TEXT[],
+          date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+      `);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          token VARCHAR(100) PRIMARY KEY,
+          username VARCHAR(50) NOT NULL,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          last_accessed TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          expires_at TIMESTAMP WITH TIME ZONE,
+          INDEX idx_expires_at (expires_at),
+          INDEX idx_username (username)
+        )
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_posts_date ON posts (date DESC)
+      `);
+      console.log("Database tables initialized");
+    } catch (error) {
+      console.error("Error initializing tables:", error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  // 文章相关操作
+  async getAllPosts() {
+    const startTime = Date.now();
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        SELECT id, title, content, tags, date, updated_at as "updatedAt"
+        FROM posts 
+        ORDER BY date DESC
+      `);
+      const duration = Date.now() - startTime;
+      console.log(`Fetched ${result.rows.length} posts from Neon in ${duration}ms`);
+      return result.rows.map((row) => ({
+        ...row,
+        tags: row.tags || []
+      }));
+    } catch (error) {
+      console.error("Error getting all posts:", error);
+      return [];
+    } finally {
+      client.release();
+    }
+  }
+  async getPost(postId) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        SELECT id, title, content, tags, date, updated_at as "updatedAt"
+        FROM posts 
+        WHERE id = $1
+      `, [postId]);
+      if (result.rows.length === 0) return null;
+      return {
+        ...result.rows[0],
+        tags: result.rows[0].tags || []
+      };
+    } catch (error) {
+      console.error("Error getting post:", error);
+      return null;
+    } finally {
+      client.release();
+    }
+  }
+  async createPost(postData) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        INSERT INTO posts (id, title, content, tags, date)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+      `, [postData.id, postData.title || "", postData.content, postData.tags || [], postData.date]);
+      console.log("Created post:", result.rows[0].id);
+      return result.rows[0];
+    } catch (error) {
+      console.error("Error creating post:", error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  async updatePost(postId, updateData) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        UPDATE posts 
+        SET title = $1, content = $2, tags = $3, updated_at = NOW()
+        WHERE id = $4
+        RETURNING *
+      `, [updateData.title || "", updateData.content, updateData.tags || [], postId]);
+      if (result.rows.length === 0) return null;
+      console.log("Updated post:", postId);
+      return {
+        ...result.rows[0],
+        tags: result.rows[0].tags || []
+      };
+    } catch (error) {
+      console.error("Error updating post:", error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  async deletePost(postId) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        DELETE FROM posts WHERE id = $1
+        RETURNING id
+      `, [postId]);
+      const deleted = result.rows.length > 0;
+      console.log(`${deleted ? "Deleted" : "Not found"} post: ${postId}`);
+      return deleted;
+    } catch (error) {
+      console.error("Error deleting post:", error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  // 会话相关操作
+  async createSession(token, username, expiresIn = 604800) {
+    const client = await this.pool.connect();
+    try {
+      const expiresAt = new Date(Date.now() + expiresIn * 1e3);
+      await client.query(`
+        INSERT INTO sessions (token, username, expires_at)
+        VALUES ($1, $2, $3)
+      `, [token, username, expiresAt]);
+      console.log("Created session for user:", username);
+      return true;
+    } catch (error) {
+      console.error("Error creating session:", error);
+      return false;
+    } finally {
+      client.release();
+    }
+  }
+  async getSession(token) {
+    const client = await this.pool.connect();
+    try {
+      await this.cleanupExpiredSessions(client);
+      const result = await client.query(`
+        SELECT token, username, created_at, last_accessed, expires_at
+        FROM sessions 
+        WHERE token = $1 AND expires_at > NOW()
+      `, [token]);
+      if (result.rows.length === 0) return null;
+      const session = result.rows[0];
+      client.query(`
+        UPDATE sessions 
+        SET last_accessed = NOW() 
+        WHERE token = $1
+      `, [token]).catch((err) => console.error("Error updating last accessed:", err));
+      return {
+        username: session.username,
+        createdAt: session.created_at,
+        lastAccessed: session.last_accessed
+      };
+    } catch (error) {
+      console.error("Error getting session:", error);
+      return null;
+    } finally {
+      client.release();
+    }
+  }
+  async updateSession(token, updateData) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        UPDATE sessions 
+        SET last_accessed = NOW()
+        WHERE token = $1
+        RETURNING *
+      `, [token]);
+      return result.rows.length > 0;
+    } catch (error) {
+      console.error("Error updating session:", error);
+      return false;
+    } finally {
+      client.release();
+    }
+  }
+  async deleteSession(token) {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(`
+        DELETE FROM sessions WHERE token = $1
+        RETURNING token
+      `, [token]);
+      const deleted = result.rows.length > 0;
+      console.log(`${deleted ? "Deleted" : "Not found"} session: ${token.substring(0, 8)}...`);
+      return deleted;
+    } catch (error) {
+      console.error("Error deleting session:", error);
+      return false;
+    } finally {
+      client.release();
+    }
+  }
+  async cleanupExpiredSessions(client = null) {
+    const shouldReleaseClient = !client;
+    if (shouldReleaseClient) {
+      client = await this.pool.connect();
+    }
+    try {
+      const result = await client.query(`
+        DELETE FROM sessions 
+        WHERE expires_at <= NOW()
+        RETURNING token
+      `);
+      if (result.rows.length > 0) {
+        console.log(`Cleaned up ${result.rows.length} expired sessions`);
+      }
+      return result.rows.length;
+    } catch (error) {
+      console.error("Error cleaning up sessions:", error);
+      return 0;
+    } finally {
+      if (shouldReleaseClient) {
+        client.release();
+      }
+    }
+  }
+  // 数据库统计和监控
+  async getStats() {
+    const client = await this.pool.connect();
+    try {
+      const postsResult = await client.query(`
+        SELECT COUNT(*) as total_posts FROM posts
+      `);
+      const sessionsResult = await client.query(`
+        SELECT COUNT(*) as active_sessions 
+        FROM sessions 
+        WHERE expires_at > NOW()
+      `);
+      const expiredResult = await client.query(`
+        SELECT COUNT(*) as expired_sessions 
+        FROM sessions 
+        WHERE expires_at <= NOW()
+      `);
+      return {
+        posts: {
+          total: parseInt(postsResult.rows[0].total_posts)
+        },
+        sessions: {
+          active: parseInt(sessionsResult.rows[0].active_sessions),
+          expired: parseInt(expiredResult.rows[0].expired_sessions)
+        },
+        database: {
+          connected: this.pool.totalCount || 0,
+          idle: this.pool.idleCount || 0,
+          waiting: this.pool.waitingCount || 0
+        }
+      };
+    } catch (error) {
+      console.error("Error getting stats:", error);
+      return null;
+    } finally {
+      client.release();
+    }
+  }
+  // 关闭连接池
+  async close() {
+    if (this.pool) {
+      await this.pool.end();
+      console.log("Neon PostgreSQL connection closed");
+    }
+  }
+  // 健康检查
+  async healthCheck() {
+    try {
+      const client = await this.pool.connect();
+      const result = await client.query("SELECT 1 as health");
+      client.release();
+      return {
+        status: "healthy",
+        database: "neon_postgresql",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        connected: this.pool.totalCount || 0
+      };
+    } catch (error) {
+      return {
+        status: "unhealthy",
+        error: error.message,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+  }
+};
+function createDatabaseAdapter(env) {
+  const dbType = env.DATABASE_TYPE || "kv";
+  switch (dbType.toLowerCase()) {
+    case "neon":
+    case "postgresql":
+      console.log("Using Neon PostgreSQL adapter");
+      return new NeonDatabase(env);
+    case "kv":
+    default:
+      console.log("Using KV fallback adapter");
+      return null;
+  }
+}
+__name(createDatabaseAdapter, "createDatabaseAdapter");
+var DatabaseWrapper = class {
+  static {
+    __name(this, "DatabaseWrapper");
+  }
+  constructor(env) {
+    this.adapter = createDatabaseAdapter(env);
+    this.env = env;
+  }
+  async initialize() {
+    if (this.adapter) {
+      await this.adapter.initialize();
+    }
+  }
+  // 自动路由到合适的数据库
+  async getAllPosts() {
+    if (this.adapter) {
+      return await this.adapter.getAllPosts();
+    }
+    const { getAllPosts: getAllPosts2 } = await Promise.resolve().then(() => (init_utils(), utils_exports));
+    return await getAllPosts2(this.env.POSTS_KV);
+  }
+  async getPost(postId) {
+    if (this.adapter) {
+      return await this.adapter.getPost(postId);
+    }
+    const postData = await this.env.POSTS_KV.get(`post:${postId}`, "json");
+    return postData;
+  }
+  async createPost(postData) {
+    if (this.adapter) {
+      return await this.adapter.createPost(postData);
+    }
+    await this.env.POSTS_KV.put(`post:${postData.id}`, JSON.stringify(postData));
+    return postData;
+  }
+  async updatePost(postId, updateData) {
+    if (this.adapter) {
+      return await this.adapter.updatePost(postId, updateData);
+    }
+    const existingPost = await this.env.POSTS_KV.get(`post:${postId}`, "json");
+    if (!existingPost) return null;
+    const updatedPost = { ...existingPost, ...updateData, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    await this.env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
+    return updatedPost;
+  }
+  async deletePost(postId) {
+    if (this.adapter) {
+      return await this.adapter.deletePost(postId);
+    }
+    await this.env.POSTS_KV.delete(`post:${postId}`);
+    return true;
+  }
+  async getSession(token) {
+    if (this.adapter) {
+      return await this.adapter.getSession(token);
+    }
+    const { verifySession: verifySession2 } = await Promise.resolve().then(() => (init_utils(), utils_exports));
+    const result = await verifySession2(
+      { headers: { get: /* @__PURE__ */ __name(() => `session=${token}`, "get") } },
+      this.env
+    );
+    return result.valid ? { username: result.username } : null;
+  }
+  async getStats() {
+    if (this.adapter) {
+      return await this.adapter.getStats();
+    }
+    try {
+      const list = await this.env.POSTS_KV.list({ prefix: "post:" });
+      const sessionList = await this.env.POSTS_KV.list({ prefix: "session:" });
+      return {
+        posts: { total: list.keys.length },
+        sessions: {
+          active: sessionList.keys.length,
+          expired: "unknown"
+        },
+        database: { type: "cloudflare_kv" }
+      };
+    } catch (error) {
+      console.error("Error getting KV stats:", error);
+      return null;
+    }
+  }
+};
+
 // src/index.js
+var dbWrapper2 = null;
+async function initializeDatabase(env) {
+  if (!dbWrapper2) {
+    dbWrapper2 = new DatabaseWrapper(env);
+    await dbWrapper2.initialize();
+  }
+}
+__name(initializeDatabase, "initializeDatabase");
 var index_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -2106,16 +2649,17 @@ var index_default = {
       return new Response(null, { headers: corsHeaders });
     }
     try {
+      await initializeDatabase(env);
       if (path.startsWith("/auth")) {
-        return handleAuth(request, env);
+        return handleAuth(request, env, dbWrapper2);
       }
       if (path.startsWith("/api")) {
-        return handleAPI(request, env);
+        return handleAPI(request, env, dbWrapper2);
       }
       if (path.startsWith("/admin")) {
-        return handleAdmin(request, env);
+        return handleAdmin(request, env, dbWrapper2);
       }
-      return handlePublic(request, env);
+      return handlePublic(request, env, dbWrapper2);
     } catch (error) {
       console.error("Error handling request:", error);
       return new Response(`\u670D\u52A1\u5668\u9519\u8BEF: ${error.message}`, {

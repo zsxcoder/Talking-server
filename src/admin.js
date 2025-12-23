@@ -1,9 +1,9 @@
-import { getAllPosts } from './utils.js';
+import { getAllPosts, clearPostsCache } from './utils.js';
 import { uploadFile, getFileUrl } from './storage.js';
 import { withSession, createHTMLResponse, createRedirectResponse } from './session-middleware.js';
 import { getThemeToggleHTML, getThemeToggleScript, getThemeCSS } from './theme.js';
 
-export async function handleAdmin(request, env) {
+export async function handleAdmin(request, env, dbWrapper = null) {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -22,12 +22,12 @@ export async function handleAdmin(request, env) {
     // 处理管理后台主页
     if (path === '/admin' || path === '/admin/') {
       if (request.method === 'GET') {
-        const posts = await getAllPosts(env.POSTS_KV);
+        const posts = dbWrapper ? await dbWrapper.getAllPosts() : await getAllPosts(env.POSTS_KV);
         return createHTMLResponse(getAdminHTML(posts));
       }
 
       if (request.method === 'POST') {
-        return await handleCreatePost(request, env);
+        return await handleCreatePost(request, env, dbWrapper);
       }
     }
 
@@ -36,7 +36,7 @@ export async function handleAdmin(request, env) {
       const postId = path.split('/').pop();
       
       if (request.method === 'GET') {
-        const postData = await env.POSTS_KV.get(`post:${postId}`, 'json');
+        const postData = dbWrapper ? await dbWrapper.getPost(postId) : await env.POSTS_KV.get(`post:${postId}`, 'json');
         if (!postData) {
           return new Response('动态未找到', { status: 404 });
         }
@@ -44,14 +44,23 @@ export async function handleAdmin(request, env) {
       }
       
       if (request.method === 'POST') {
-        return await handleUpdatePost(request, env, postId);
+        return await handleUpdatePost(request, env, postId, dbWrapper);
       }
     }
 
     // 处理删除请求
     if (path.startsWith('/admin/delete/')) {
       const postId = path.split('/').pop();
-      await env.POSTS_KV.delete(`post:${postId}`);
+
+      if (dbWrapper) {
+        await dbWrapper.deletePost(postId);
+      } else {
+        await env.POSTS_KV.delete(`post:${postId}`);
+      }
+
+      // 清除缓存，确保删除立即可见
+      clearPostsCache();
+
       const baseUrl = `${url.protocol}//${url.host}`;
       return createRedirectResponse(`${baseUrl}/admin`);
     }
@@ -86,7 +95,51 @@ async function handleLogout(request, env) {
   });
 }
 
-async function handleCreatePost(request, env) {
+// 自动清理旧文章，只保留最新的指定数量
+async function cleanupOldPosts(kv, maxPosts = 20) {
+  try {
+    console.log('Checking post count, max allowed:', maxPosts);
+    
+    // 获取所有文章键
+    const list = await kv.list({ prefix: 'post:' });
+    const allPosts = [];
+    
+    // 并行获取所有文章数据
+    const promises = list.keys.map(async key => {
+      const postData = await kv.get(key.name, 'json');
+      if (postData) {
+        allPosts.push({ ...postData, key: key.name });
+      }
+    });
+    
+    await Promise.all(promises);
+    
+    // 按时间排序（最新的在前）
+    allPosts.sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    // 检查是否需要清理
+    if (allPosts.length > maxPosts) {
+      const postsToDelete = allPosts.slice(maxPosts);
+      console.log(`Cleaning up ${postsToDelete.length} old posts (keeping ${maxPosts} newest)`);
+      
+      // 批量删除旧文章
+      const deletePromises = postsToDelete.map(post => {
+        console.log(`Deleting old post: ${post.id} from ${post.date}`);
+        return kv.delete(post.key);
+      });
+      
+      await Promise.all(deletePromises);
+      console.log(`Successfully deleted ${postsToDelete.length} old posts`);
+    } else {
+      console.log(`Post count (${allPosts.length}) within limit (${maxPosts}), no cleanup needed`);
+    }
+  } catch (error) {
+    console.error('Error cleaning up old posts:', error);
+    // 不影响文章创建，只是记录错误
+  }
+}
+
+async function handleCreatePost(request, env, dbWrapper = null) {
   const formData = await request.formData();
   const content = formData.get('content');
   const tags = formData.get('tags').split(',').map(tag => tag.trim()).filter(Boolean);
@@ -134,21 +187,33 @@ async function handleCreatePost(request, env) {
     content: finalContent
   };
 
-  await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
-  
+  // 如果使用 KV，自动清理旧文章（只保留最新的20篇）
+  if (!dbWrapper) {
+    await cleanupOldPosts(env.POSTS_KV, 20);
+  }
+
+  if (dbWrapper) {
+    await dbWrapper.createPost(postData);
+  } else {
+    await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
+  }
+
+  // 清除缓存，确保新文章立即可见
+  clearPostsCache();
+
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
   return createRedirectResponse(`${baseUrl}/admin`);
 }
 
-async function handleUpdatePost(request, env, postId) {
+async function handleUpdatePost(request, env, postId, dbWrapper = null) {
   const formData = await request.formData();
   const content = formData.get('content');
   const tags = formData.get('tags').split(',').map(tag => tag.trim()).filter(Boolean);
   const image = formData.get('image');
 
   // 获取原有数据
-  const existingPost = await env.POSTS_KV.get(`post:${postId}`, 'json');
+  const existingPost = dbWrapper ? await dbWrapper.getPost(postId) : await env.POSTS_KV.get(`post:${postId}`, 'json');
   if (!existingPost) {
     return new Response('动态未找到', { status: 404 });
   }
@@ -189,8 +254,15 @@ async function handleUpdatePost(request, env, postId) {
     updatedAt: new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
   };
 
-  await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
-  
+  if (dbWrapper) {
+    await dbWrapper.updatePost(postId, updatedPost);
+  } else {
+    await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
+  }
+
+  // 清除缓存，确保更新立即可见
+  clearPostsCache();
+
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
   return createRedirectResponse(`${baseUrl}/admin`);
@@ -310,12 +382,15 @@ function getLoginHTML() {
         }
         
         .github-btn {
-            background-color: #333;
+            background-color: #ffffff;
+            color: #333;
             margin-bottom: 15px;
+            border: 1px solid #e5e5e5;
         }
-        
+
         .github-btn:hover {
-            background-color: #24292e;
+            background-color: #f5f5f5;
+            border-color: #d0d0d0;
         }
         
         .login-divider {

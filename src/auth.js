@@ -1,4 +1,4 @@
-export async function handleAuth(request, env) {
+export async function handleAuth(request, env, dbWrapper = null) {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -77,15 +77,20 @@ export async function handleAuth(request, env) {
 
       // 创建会话令牌
       const sessionToken = await generateSessionToken(username);
-      
-      // 将会话信息存储到 KV 中，有效期 7 天
-      await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
-        username: username,
-        createdAt: Date.now(),
-        lastAccessed: Date.now()
-      }), {
-        expirationTtl: 604800 // 7 天后过期
-      });
+
+      // 将会话信息存储到数据库中
+      if (dbWrapper && dbWrapper.adapter) {
+        await dbWrapper.adapter.createSession(sessionToken, username);
+      } else {
+        // 回退到 KV
+        await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
+          username: username,
+          createdAt: Date.now(),
+          lastAccessed: Date.now()
+        }), {
+          expirationTtl: 604800 // 7 天后过期
+        });
+      }
 
       const baseUrl = `${url.protocol}//${url.host}`;
       return new Response(null, {

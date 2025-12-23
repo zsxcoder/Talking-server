@@ -2,7 +2,7 @@ import { getAllPosts } from './utils.js';
 import { getFile, getFileUrl } from './storage.js';
 import { getThemeToggleHTML, getThemeToggleScript, getThemeCSS } from './theme.js';
 
-export async function handlePublic(request, env) {
+export async function handlePublic(request, env, dbWrapper = null) {
   const url = new URL(request.url);
   
   if (url.pathname.startsWith('/images/')) {
@@ -30,8 +30,8 @@ export async function handlePublic(request, env) {
     });
   }
 
-  // 主页展示
-  const posts = await getAllPosts(env.POSTS_KV);
+  // 主页展示 - 使用数据库包装器
+  const posts = dbWrapper ? await dbWrapper.getAllPosts() : await getAllPosts(env.POSTS_KV);
   return new Response(getPublicHTML(posts), {
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
   });

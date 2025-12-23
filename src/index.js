@@ -2,6 +2,18 @@ import { handleAuth } from './auth.js';
 import { handleAPI } from './api.js';
 import { handleAdmin } from './admin.js';
 import { handlePublic } from './public.js';
+import { DatabaseWrapper } from './database.js';
+
+// 全局数据库实例（避免重复初始化）
+let dbWrapper = null;
+
+// 初始化数据库连接
+async function initializeDatabase(env) {
+  if (!dbWrapper) {
+    dbWrapper = new DatabaseWrapper(env);
+    await dbWrapper.initialize();
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -21,20 +33,23 @@ export default {
     }
     
     try {
+      // 初始化数据库（如果尚未初始化）
+      await initializeDatabase(env);
+      
       // 路由处理
       if (path.startsWith('/auth')) {
-        return handleAuth(request, env);
+        return handleAuth(request, env, dbWrapper);
       }
       
       if (path.startsWith('/api')) {
-        return handleAPI(request, env);
+        return handleAPI(request, env, dbWrapper);
       }
       
       if (path.startsWith('/admin')) {
-        return handleAdmin(request, env);
+        return handleAdmin(request, env, dbWrapper);
       }
       
-      return handlePublic(request, env);
+      return handlePublic(request, env, dbWrapper);
     } catch (error) {
       console.error('Error handling request:', error);
       return new Response(`服务器错误: ${error.message}`, { 
