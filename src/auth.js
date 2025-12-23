@@ -77,13 +77,22 @@ export async function handleAuth(request, env) {
 
       // 创建会话令牌
       const sessionToken = await generateSessionToken(username);
+      
+      // 将会话信息存储到 KV 中，有效期 7 天
+      await env.POSTS_KV.put(`session:${sessionToken}`, JSON.stringify({
+        username: username,
+        createdAt: Date.now(),
+        lastAccessed: Date.now()
+      }), {
+        expirationTtl: 604800 // 7 天后过期
+      });
 
       const baseUrl = `${url.protocol}//${url.host}`;
       return new Response(null, {
         status: 302,
         headers: {
           'Location': `${baseUrl}/admin`,
-          'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400; Path=/`
+          'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Lax; Max-Age=604800; Path=/;`
         }
       });
 

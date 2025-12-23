@@ -1,73 +1,89 @@
-import { verifySession, getAllPosts } from './utils.js';
+import { getAllPosts } from './utils.js';
+import { uploadFile, getFileUrl } from './storage.js';
+import { withSession, createHTMLResponse, createRedirectResponse } from './session-middleware.js';
+import { getThemeToggleHTML, getThemeToggleScript, getThemeCSS } from './theme.js';
 
 export async function handleAdmin(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // 处理退出登录
-  if (path === '/admin/logout') {
-    const baseUrl = `${url.protocol}//${url.host}`;
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'Location': `${baseUrl}/admin/login`,
-        'Set-Cookie': 'session=; HttpOnly; Secure; SameSite=Strict; Max-Age=0; Path=/'
-      }
-    });
-  }
-
-  // 验证管理员权限
-  const isAuthenticated = await verifySession(request, env);
-  if (!isAuthenticated && path !== '/admin/login') {
-    const baseUrl = `${url.protocol}//${url.host}`;
-    return Response.redirect(`${baseUrl}/admin/login`);
-  }
-
-  if (path === '/admin/login') {
-    return new Response(getLoginHTML(), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    });
-  }
-
-  if (path === '/admin' || path === '/admin/') {
-    if (request.method === 'GET') {
-      const posts = await getAllPosts(env.POSTS_KV);
-      return new Response(getAdminHTML(posts), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      });
-    }
-
-    if (request.method === 'POST') {
-      return await handleCreatePost(request, env);
-    }
-  }
-
-  if (path.startsWith('/admin/edit/')) {
-    const postId = path.split('/').pop();
-    
-    if (request.method === 'GET') {
-      const postData = await env.POSTS_KV.get(`post:${postId}`, 'json');
-      if (!postData) {
-        return new Response('动态未找到', { status: 404 });
-      }
-      return new Response(getEditHTML(postData), {
-        headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      });
+  // 使用会话中间件处理所有请求
+  return withSession(request, env, async (request, env, authResult) => {
+    // 处理退出登录
+    if (path === '/admin/logout') {
+      return await handleLogout(request, env);
     }
     
-    if (request.method === 'POST') {
-      return await handleUpdatePost(request, env, postId);
+    // 处理登录页面
+    if (path === '/admin/login') {
+      return createHTMLResponse(getLoginHTML());
+    }
+
+    // 处理管理后台主页
+    if (path === '/admin' || path === '/admin/') {
+      if (request.method === 'GET') {
+        const posts = await getAllPosts(env.POSTS_KV);
+        return createHTMLResponse(getAdminHTML(posts));
+      }
+
+      if (request.method === 'POST') {
+        return await handleCreatePost(request, env);
+      }
+    }
+
+    // 处理编辑页面
+    if (path.startsWith('/admin/edit/')) {
+      const postId = path.split('/').pop();
+      
+      if (request.method === 'GET') {
+        const postData = await env.POSTS_KV.get(`post:${postId}`, 'json');
+        if (!postData) {
+          return new Response('动态未找到', { status: 404 });
+        }
+        return createHTMLResponse(getEditHTML(postData));
+      }
+      
+      if (request.method === 'POST') {
+        return await handleUpdatePost(request, env, postId);
+      }
+    }
+
+    // 处理删除请求
+    if (path.startsWith('/admin/delete/')) {
+      const postId = path.split('/').pop();
+      await env.POSTS_KV.delete(`post:${postId}`);
+      const baseUrl = `${url.protocol}//${url.host}`;
+      return createRedirectResponse(`${baseUrl}/admin`);
+    }
+
+    return new Response('未找到', { status: 404 });
+  }, false); // 退出登录和登录页面不需要强制认证
+}
+
+async function handleLogout(request, env) {
+  const url = new URL(request.url);
+  const cookieHeader = request.headers.get('Cookie');
+  
+  if (cookieHeader) {
+    const cookies = cookieHeader.split(';').reduce((acc, cookie) => {
+      const [key, ...values] = cookie.trim().split('=');
+      if (key && values.length > 0) {
+        acc[key] = values.join('=');
+      }
+      return acc;
+    }, {});
+    
+    const sessionToken = cookies.session;
+    if (sessionToken) {
+      // 从 KV 中删除会话信息
+      await env.POSTS_KV.delete(`session:${sessionToken}`);
     }
   }
-
-  if (path.startsWith('/admin/delete/')) {
-    const postId = path.split('/').pop();
-    await env.POSTS_KV.delete(`post:${postId}`);
-    const baseUrl = `${url.protocol}//${url.host}`;
-    return Response.redirect(`${baseUrl}/admin`);
-  }
-
-  return new Response('未找到', { status: 404 });
+  
+  const baseUrl = `${url.protocol}//${url.host}`;
+  return createRedirectResponse(`${baseUrl}/admin/login`, {
+    'Set-Cookie': 'session=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/'
+  });
 }
 
 async function handleCreatePost(request, env) {
@@ -90,21 +106,20 @@ async function handleCreatePost(request, env) {
       const imageKey = `${postId}-${image.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
       console.log('Uploading image with key:', imageKey);
       
-      // 上传到 R2
-      const uploadResult = await env.POST_BUCKET.put(imageKey, image.stream(), {
-        httpMetadata: {
+      // 上传到存储服务（R2 或 OSS）
+      try {
+        await uploadFile({
+          stream: image.stream(),
+          key: imageKey,
           contentType: image.type || 'image/jpeg'
-        }
-      });
-      
-      console.log('Upload result:', uploadResult);
-      
-      if (uploadResult) {
-        const url = new URL(request.url);
-        const baseUrl = `${url.protocol}//${url.host}`;
-        const imageUrl = `${baseUrl}/images/${imageKey}`;
+        }, env);
+        
+        const imageUrl = await getFileUrl(imageKey, env, request);
         finalContent = `![${image.name}](${imageUrl})\n\n${content}`;
         console.log('Image uploaded successfully, URL:', imageUrl);
+      } catch (error) {
+        console.error('Image upload failed:', error);
+        // 继续发布文本内容，即使图片上传失败
       }
     } catch (error) {
       console.error('Image upload failed:', error);
@@ -123,7 +138,7 @@ async function handleCreatePost(request, env) {
   
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
-  return Response.redirect(`${baseUrl}/admin`);
+  return createRedirectResponse(`${baseUrl}/admin`);
 }
 
 async function handleUpdatePost(request, env, postId) {
@@ -148,18 +163,19 @@ async function handleUpdatePost(request, env, postId) {
       const imageKey = `${postId}-${image.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
       console.log('Uploading image with key:', imageKey);
       
-      const uploadResult = await env.POST_BUCKET.put(imageKey, image.stream(), {
-        httpMetadata: {
+      // 上传到存储服务（R2 或 OSS）
+      try {
+        await uploadFile({
+          stream: image.stream(),
+          key: imageKey,
           contentType: image.type || 'image/jpeg'
-        }
-      });
-      
-      if (uploadResult) {
-        const url = new URL(request.url);
-        const baseUrl = `${url.protocol}//${url.host}`;
-        const imageUrl = `${baseUrl}/images/${imageKey}`;
+        }, env);
+        
+        const imageUrl = await getFileUrl(imageKey, env, request);
         finalContent = `![${image.name}](${imageUrl})\n\n${content}`;
         console.log('Image uploaded successfully, URL:', imageUrl);
+      } catch (error) {
+        console.error('Image upload failed:', error);
       }
     } catch (error) {
       console.error('Image upload failed:', error);
@@ -177,7 +193,7 @@ async function handleUpdatePost(request, env, postId) {
   
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
-  return Response.redirect(`${baseUrl}/admin`);
+  return createRedirectResponse(`${baseUrl}/admin`);
 }
 
 function getLoginHTML() {
@@ -192,231 +208,264 @@ function getLoginHTML() {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background-color: var(--bg-tertiary);
+            color: var(--text-primary);
+            height: 100vh;
             display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #333;
+            flex-direction: column;
         }
         
-        .login-container {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 50px 40px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
-            text-align: center;
-            max-width: 650px;
-            width: 90%;
-            margin: 20px;
+        .header { 
+            height: 46px;
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .header-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .back-home {
+            position: absolute;
+            left: 15px;
+            color: var(--accent-color);
+            text-decoration: none;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .content {
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .login-card {
+            background-color: var(--card-bg);
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            padding: 25px;
+            width: 100%;
+            max-width: 350px;
         }
         
         .login-header {
-            margin-bottom: 40px;
+            text-align: center;
+            margin-bottom: 25px;
         }
         
-        .login-header h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 15px;
+        .login-avatar {
+            width: 60px;
+            height: 60px;
+            background-image: url('https://imgbed.mcyzsx.top/file/avatar/1765626136745_zsxcoder.jpg');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            border-radius: 10px;
+            margin: 0 auto 15px;
         }
         
-        .login-header p {
-            color: #666;
-            font-size: 1.1rem;
-            line-height: 1.6;
+        .login-title {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: var(--text-primary);
         }
         
-        .login-icon {
-            font-size: 4rem;
+        .login-subtitle {
+            font-size: 14px;
+            color: var(--text-tertiary);
             margin-bottom: 20px;
-            display: block;
         }
         
         .login-btn {
-            background: linear-gradient(135deg, #24292e, #1a1e22);
+            width: 100%;
+            background-color: #07c160;
             color: white;
-            padding: 18px 35px;
-            text-decoration: none;
-            border-radius: 12px;
-            font-size: 1.1rem;
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            transition: all 0.3s ease;
             border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 500;
+            padding: 12px;
             cursor: pointer;
-            box-shadow: 0 4px 15px rgba(36, 41, 46, 0.2);
+            transition: background-color 0.2s;
+            text-decoration: none;
+            display: inline-block;
+            text-align: center;
+            margin-bottom: 15px;
         }
         
         .login-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(36, 41, 46, 0.3);
-            background: linear-gradient(135deg, #1a1e22, #0d1117);
+            background-color: #06ad56;
         }
         
-        .github-icon {
-            font-size: 1.3rem;
+        .github-btn {
+            background-color: #333;
+            margin-bottom: 15px;
+        }
+        
+        .github-btn:hover {
+            background-color: #24292e;
+        }
+        
+        .login-divider {
+            display: flex;
+            align-items: center;
+            margin: 15px 0;
+            color: #999;
+            font-size: 12px;
+        }
+        
+        .login-divider::before, .login-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background-color: #e5e5e5;
+        }
+        
+        .login-divider-text {
+            padding: 0 15px;
         }
         
         .features {
-            margin-top: 40px;
-            padding-top: 30px;
-            border-top: 1px solid #e1e8ed;
+            margin-top: 15px;
+            background-color: #f8f8f8;
+            border-radius: 5px;
+            padding: 15px;
         }
         
-        .features h3 {
-            color: #333;
-            font-size: 1.2rem;
-            margin-bottom: 20px;
+        .features-title {
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 10px;
+            color: var(--text-primary);
         }
         
         .feature-list {
             display: grid;
-            gap: 15px;
-            text-align: left;
+            gap: 8px;
         }
         
         .feature-item {
             display: flex;
             align-items: center;
-            gap: 12px;
-            color: #666;
-            font-size: 0.95rem;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
         }
         
         .feature-icon {
-            font-size: 1.2rem;
-            width: 24px;
+            width: 16px;
             text-align: center;
         }
         
-        .back-home {
-            position: absolute;
-            top: 30px;
-            left: 30px;
-            background: rgba(255, 255, 255, 0.9);
-            color: #667eea;
-            padding: 12px 20px;
-            text-decoration: none;
-            border-radius: 10px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            backdrop-filter: blur(10px);
-        }
-        
-        .back-home:hover {
-            background: rgba(255, 255, 255, 1);
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
-        }
-        
-        @media (max-width: 768px) {
-            .login-container {
-                padding: 40px 30px;
-                margin: 15px;
-            }
-            
-            .login-header h1 {
-                font-size: 2rem;
-            }
-            
-            .back-home {
-                position: static;
-                margin-bottom: 20px;
-                align-self: flex-start;
-            }
-            
-            body {
-                padding: 20px 0;
-                align-items: flex-start;
-            }
-        }
-        
         .security-note {
-            margin-top: 30px;
-            padding: 20px;
-            background: rgba(102, 126, 234, 0.1);
-            border-radius: 12px;
-            border-left: 4px solid #667eea;
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f0f8ff;
+            border-radius: 5px;
+            border-left: 3px solid #576b95;
         }
         
-        .security-note h4 {
-            color: #667eea;
-            font-size: 1rem;
-            margin-bottom: 8px;
+        .security-note-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--accent-color);
+            margin-bottom: 5px;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 5px;
         }
         
-        .security-note p {
-            color: #666;
-            font-size: 0.9rem;
-            line-height: 1.5;
+        .security-note-text {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.4;
         }
+        
+        ${getThemeCSS()}
     </style>
 </head>
 <body>
-    <a href="/" class="back-home">
-        🏠 返回首页
-    </a>
-    
-    <div class="login-container">
-        <div class="login-header">
-            <span class="login-icon">🔐</span>
-            <h1>管理员登录</h1>
-            <p>使用 GitHub 账号安全登录管理后台</p>
-        </div>
-        
-        <a href="/auth/login" class="login-btn">
-            <span class="github-icon">🐙</span>
-            使用 GitHub 登录
+    <div class="header">
+        <a href="/" class="back-home">
+            <span>← 首页</span>
         </a>
-        
-        <div class="security-note">
-            <h4>
-                🛡️ 安全提示
-            </h4>
-            <p>只有授权的管理员账号才能访问后台管理功能，登录过程通过 GitHub OAuth 进行安全验证。</p>
-        </div>
-        
-        <div class="features">
-            <h3>✨ 管理功能</h3>
-            <div class="feature-list">
-                <div class="feature-item">
-                    <span class="feature-icon">📝</span>
-                    <span>发布和编辑动态内容</span>
+        <div class="header-title">管理员登录</div>
+    </div>
+    
+    <div class="content">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-avatar"></div>
+                <div class="login-title">管理员登录</div>
+                <div class="login-subtitle">使用第三方账号安全登录</div>
+            </div>
+            
+            <a href="/auth/login" class="login-btn github-btn">
+                <span style="margin-right: 8px;">🐙</span> 使用 GitHub 登录
+            </a>
+            
+            <div class="login-divider">
+                <div class="login-divider-text">或者</div>
+            </div>
+            
+            <button class="login-btn" disabled>
+                微信登录 (暂未开放)
+            </button>
+            
+            <div class="features">
+                <div class="features-title">管理功能</div>
+                <div class="feature-list">
+                    <div class="feature-item">
+                        <span class="feature-icon">📝</span>
+                        <span>发布和编辑动态内容</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">🖼️</span>
+                        <span>上传和管理图片</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">🏷️</span>
+                        <span>添加和管理标签</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">📊</span>
+                        <span>查看所有已发布内容</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">🗑️</span>
+                        <span>删除不需要的动态</span>
+                    </div>
                 </div>
-                <div class="feature-item">
-                    <span class="feature-icon">🖼️</span>
-                    <span>上传和管理图片</span>
+            </div>
+            
+            <div class="security-note">
+                <div class="security-note-title">
+                    <span>🛡️</span>
+                    <span>安全提示</span>
                 </div>
-                <div class="feature-item">
-                    <span class="feature-icon">🏷️</span>
-                    <span>添加和管理标签</span>
-                </div>
-                <div class="feature-item">
-                    <span class="feature-icon">📊</span>
-                    <span>查看所有已发布内容</span>
-                </div>
-                <div class="feature-item">
-                    <span class="feature-icon">🗑️</span>
-                    <span>删除不需要的动态</span>
+                <div class="security-note-text">
+                    只有授权的管理员账号才能访问后台管理功能，登录过程通过 GitHub OAuth 进行安全验证。
                 </div>
             </div>
         </div>
     </div>
+    
+    ${getThemeToggleScript()}
+    
+    <!-- 主题切换按钮 -->
+    ${getThemeToggleHTML()}
 </body>
 </html>`;
 }
@@ -426,7 +475,7 @@ function getAdminHTML(posts) {
 <!DOCTYPE html>
 <html>
 <head>
-    <title>动态管理后台</title>
+    <title>朋友圈管理</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -434,340 +483,391 @@ function getAdminHTML(posts) {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 16px;
+            line-height: 1.5;
         }
         
-        .container {
-            max-width: 1200px;
+        .header { 
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 46px;
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        .header-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .header-buttons { 
+            position: fixed;
+            top: 0;
+            right: 10px;
+            height: 46px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            z-index: 1001;
+        }
+        
+        .logout-btn, .home-btn { 
+            color: var(--accent-color); 
+            padding: 6px 12px; 
+            text-decoration: none; 
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+        
+        .logout-btn:hover, .home-btn:hover { 
+            opacity: 0.8; 
+        }
+        
+        .content {
+            padding-top: 56px;
+            padding-bottom: 20px;
+            background-color: var(--bg-primary);
+        }
+        
+        .admin-container {
+            max-width: 620px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 0 10px;
         }
         
-        .header {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        .compose-box {
+            background-color: var(--card-bg);
+            margin-bottom: 10px;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .compose-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: var(--text-primary);
             text-align: center;
         }
         
-        .header h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            color: #666;
-            font-size: 1.1rem;
-        }
-        
-        .logout-btn {
-            background: linear-gradient(135deg, #dc3545, #c82333);
-            color: white;
-            padding: 10px 20px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-        }
-        
-        .logout-btn:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px rgba(220, 53, 69, 0.3);
-        }
-        
-        .post-form {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        }
-        
-        .post-form h2 {
-            font-size: 1.8rem;
-            margin-bottom: 25px;
-            color: #333;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 15px;
         }
         
         .form-group label {
             display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #555;
-            font-size: 0.95rem;
+            margin-bottom: 5px;
+            color: var(--text-primary);
+            font-size: 14px;
         }
         
         textarea, input[type="text"], input[type="file"] {
             width: 100%;
-            padding: 15px;
-            border: 2px solid #e1e8ed;
-            border-radius: 12px;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            background: #fff;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            font-size: 16px;
+            font-family: inherit;
+            background-color: var(--card-bg);
+            color: var(--text-primary);
+        }
+        
+        textarea {
+            height: 80px;
+            resize: vertical;
+            min-height: 80px;
         }
         
         textarea:focus, input:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-        
-        textarea {
-            height: 120px;
-            resize: vertical;
-            font-family: inherit;
+            border-color: var(--accent-color);
         }
         
         .submit-btn {
-            background: linear-gradient(135deg, #667eea, #764ba2);
+            width: 100%;
+            padding: 10px;
+            background-color: var(--accent-color);
             color: white;
-            padding: 15px 30px;
             border: none;
-            border-radius: 12px;
-            font-size: 1rem;
-            font-weight: 600;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
+            transition: background-color 0.2s;
         }
         
         .submit-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
+            opacity: 0.8;
         }
         
         .posts-section {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            margin-top: 10px;
         }
         
-        .posts-section h2 {
-            font-size: 1.8rem;
-            margin-bottom: 25px;
-            color: #333;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+        .section-title {
+            background-color: var(--header-bg);
+            padding: 12px 15px;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
         }
         
         .post-item {
-            background: #fff;
-            border: 1px solid #e1e8ed;
-            border-radius: 16px;
-            padding: 25px;
-            margin-bottom: 20px;
-            transition: all 0.3s ease;
+            background-color: var(--card-bg);
+            margin-bottom: 10px;
+            padding: 15px;
             position: relative;
         }
         
-        .post-item:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        .post-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 5px;
+            margin-right: 12px;
+            background-image: url('https://imgbed.mcyzsx.top/file/avatar/1765626136745_zsxcoder.jpg');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+        
+        .post-info {
+            flex: 1;
         }
         
         .post-meta {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
-            flex-wrap: wrap;
-            gap: 10px;
+            margin-bottom: 8px;
         }
         
-        .post-date {
-            color: #657786;
-            font-size: 0.9rem;
-            display: flex;
-            align-items: center;
-            gap: 5px;
+        .post-date { 
+            color: var(--text-tertiary); 
+            font-size: 12px; 
         }
         
         .post-tags {
             display: flex;
-            gap: 8px;
             flex-wrap: wrap;
-        }
-        
-        .tag {
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 500;
-        }
-        
-        .post-content {
-            margin: 15px 0;
-            line-height: 1.6;
-            color: #333;
-        }
-        
-        .post-content img {
-            max-width: 50%;
-            border-radius: 8px;
-            margin: 10px 0;
-        }
-        
-        .post-content h1, .post-content h2, .post-content h3 {
-            margin: 15px 0 10px 0;
-            color: #333;
-        }
-        
-        .post-content p {
-            margin: 10px 0;
-        }
-        
-        .post-content code {
-            background: #f1f3f4;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-family: 'Monaco', 'Consolas', monospace;
-        }
-        
-        .post-content pre {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            overflow-x: auto;
-            margin: 10px 0;
-        }
-        
-        .post-content blockquote {
-            border-left: 4px solid #667eea;
-            padding-left: 15px;
-            margin: 15px 0;
-            color: #666;
-            font-style: italic;
-        }
-        
-        .delete-btn {
-            background: linear-gradient(135deg, #ff6b6b, #ee5a52);
-            color: white;
-            padding: 8px 16px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
             gap: 5px;
         }
         
+        .tag { 
+            background-color: var(--button-bg);
+            color: var(--text-secondary);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+        }
+        
+        .post-content {
+            margin: 10px 0;
+            font-size: 16px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        .post-content img { 
+            max-width: 100%; 
+            border-radius: 6px;
+            margin: 10px 0;
+            display: block;
+        }
+        
+        .post-content h1, .post-content h2, .post-content h3 {
+            margin: 10px 0;
+            font-size: 16px;
+            font-weight: 500;
+        }
+        
+        .post-content p {
+            margin: 5px 0;
+        }
+        
+        .post-content code {
+            background: var(--code-bg);
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 14px;
+        }
+        
+        .post-content pre {
+            background: var(--code-bg);
+            padding: 10px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+        
+        .post-content blockquote {
+            border-left: 3px solid var(--border-color);
+            padding-left: 10px;
+            margin: 10px 0;
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+        
+        .post-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-color);
+        }
+        
+        .action-btn {
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            font-size: 14px;
+            text-decoration: none;
+            color: var(--text-primary);
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.2s;
+        }
+        
+        .action-btn:hover {
+            background-color: var(--button-bg);
+        }
+        
+        .edit-btn {
+            color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+        
+        .edit-btn:hover {
+            background-color: rgba(123, 138, 184, 0.1);
+        }
+        
+        .delete-btn {
+            color: #ff3b30;
+            border-color: #ff3b30;
+        }
+        
         .delete-btn:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+            background-color: rgba(255, 59, 48, 0.1);
         }
         
         .empty-state {
             text-align: center;
-            padding: 60px 20px;
-            color: #666;
+            padding: 40px 20px;
+            color: var(--text-tertiary);
+            background-color: var(--card-bg);
         }
         
         .empty-state h3 {
-            font-size: 1.5rem;
+            font-size: 18px;
             margin-bottom: 10px;
+            color: var(--text-secondary);
         }
         
-        @media (max-width: 768px) {
-            .container { padding: 15px; }
-            .header, .post-form, .posts-section { padding: 20px; }
-            .header h1 { font-size: 2rem; }
-            .post-meta { flex-direction: column; align-items: flex-start; }
+        @media (max-width: 620px) {
+            .admin-container {
+                padding: 0;
+            }
+            
+            .post-item {
+                border-radius: 0;
+                margin-left: -10px;
+                margin-right: -10px;
+            }
+            
+            .compose-box {
+                border-radius: 0;
+                margin-left: -10px;
+                margin-right: -10px;
+            }
         }
+        
+        ${getThemeCSS()}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>✨ 动态管理后台</h1>
-            <p>创建和管理你的社交动态</p>
-            <div style="margin-top: 15px;">
-                <a href="/admin/logout" class="logout-btn" onclick="return confirm('确定要退出登录吗？')">
-                    🚪 退出登录
-                </a>
+    <div class="header">
+        <div class="header-title">朋友圈管理</div>
+    </div>
+    
+    <div class="header-buttons">
+        <a href="/" class="home-btn">首页</a>
+        <a href="/admin/logout" class="logout-btn" onclick="return confirm('确定要退出登录吗？')">退出</a>
+    </div>
+    
+    <div class="content">
+        <div class="admin-container">
+            <div class="compose-box">
+                <h3 class="compose-title">发布新动态</h3>
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <textarea name="content" placeholder="分享你的想法..." required></textarea>
+                    </div>
+                    <div class="form-group">
+                        <input type="text" name="tags" placeholder="标签 (用逗号分隔，如: 生活, 工作, 学习)">
+                    </div>
+                    <div class="form-group">
+                        <input type="file" name="image" accept="image/*">
+                    </div>
+                    <button type="submit" class="submit-btn">发布</button>
+                </form>
             </div>
-        </div>
-        
-        <div class="post-form">
-            <h2>📝 发布新动态</h2>
-            <form method="POST" enctype="multipart/form-data">
-                <div class="form-group">
-                    <label>💭 内容 (支持 Markdown)</label>
-                    <textarea name="content" placeholder="分享你的想法..." required></textarea>
-                </div>
-                <div class="form-group">
-                    <label>🏷️ 标签 (用逗号分隔)</label>
-                    <input type="text" name="tags" placeholder="例如: 生活, 工作, 学习">
-                </div>
-                <div class="form-group">
-                    <label>🖼️ 图片</label>
-                    <input type="file" name="image" accept="image/*">
-                </div>
-                <button type="submit" class="submit-btn">
-                    🚀 发布动态
-                </button>
-            </form>
-        </div>
 
-        <div class="posts-section">
-            <h2>📋 已发布动态</h2>
-            ${posts.length === 0 ? `
-                <div class="empty-state">
-                    <h3>🌟 还没有动态</h3>
-                    <p>发布你的第一条动态吧！</p>
-                </div>
-            ` : posts.map(post => `
-                <div class="post-item">
-                    <div class="post-meta">
-                        <div class="post-date">
-                            🕒 ${post.date}
+            <div class="posts-section">
+                <div class="section-title">已发布动态</div>
+                ${posts.length === 0 ? `
+                    <div class="empty-state">
+                        <h3>还没有动态</h3>
+                        <p>发布你的第一条动态吧！</p>
+                    </div>
+                ` : posts.map(post => `
+                    <div class="post-item">
+                        <div class="post-header">
+                            <div class="avatar"></div>
+                            <div class="post-info">
+                                <div class="post-meta">
+                                    <div class="post-date">${post.date}</div>
+                                    <div class="post-tags">
+                                        ${post.tags.map(tag => `<span class="tag">#${tag}</span>`).join('')}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="post-tags">
-                            ${post.tags.map(tag => `<span class="tag">${tag}</span>`).join('')}
+                        <div class="post-content" data-markdown="${encodeURIComponent(post.content)}"></div>
+                        <div class="post-actions">
+                            <a href="/admin/edit/${post.id}" class="action-btn edit-btn">
+                                ✏️ 编辑
+                            </a>
+                            <a href="/admin/delete/${post.id}" class="action-btn delete-btn" onclick="return confirm('确定删除这条动态吗？')">
+                                🗑️ 删除
+                            </a>
                         </div>
                     </div>
-                    <div class="post-content" data-markdown="${encodeURIComponent(post.content)}"></div>
-                    <div class="post-actions" style="display: flex; gap: 10px; margin-top: 15px;">
-                        <a href="/admin/edit/${post.id}" class="edit-btn" style="background: linear-gradient(135deg, #28a745, #20c997); color: white; padding: 8px 16px; text-decoration: none; border-radius: 8px; font-size: 0.9rem; font-weight: 500; transition: all 0.3s ease; display: inline-flex; align-items: center; gap: 5px;">
-                            ✏️ 编辑
-                        </a>
-                        <a href="/admin/delete/${post.id}" class="delete-btn" onclick="return confirm('确定删除这条动态吗？')">
-                            🗑️ 删除
-                        </a>
-                    </div>
-                </div>
-            `).join('')}
+                `).join('')}
+            </div>
         </div>
     </div>
 
@@ -778,6 +878,11 @@ function getAdminHTML(posts) {
             element.innerHTML = marked.parse(markdown);
         });
     </script>
+    
+    ${getThemeToggleScript()}
+    
+    <!-- 主题切换按钮 -->
+    ${getThemeToggleHTML()}
 </body>
 </html>`;
 }
@@ -794,199 +899,250 @@ function getEditHTML(post) {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: #333;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 16px;
+            line-height: 1.5;
         }
         
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        .header {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            margin-bottom: 30px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            text-align: center;
-        }
-        
-        .header h1 {
-            font-size: 2.5rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 10px;
-        }
-        
-        .back-btn {
-            background: #6c757d;
-            color: white;
-            padding: 10px 20px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            display: inline-flex;
+        .header { 
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 46px;
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: center;
             align-items: center;
-            gap: 5px;
-            margin-bottom: 20px;
-            transition: all 0.3s ease;
+            z-index: 1000;
         }
         
-        .back-btn:hover {
-            background: #5a6268;
-            transform: translateY(-1px);
+        .header-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .header-left {
+            position: fixed;
+            top: 0;
+            left: 10px;
+            height: 46px;
+            display: flex;
+            align-items: center;
+            z-index: 1001;
+        }
+        
+        .header-right { 
+            position: fixed;
+            top: 0;
+            right: 10px;
+            height: 46px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            z-index: 1001;
+        }
+        
+        .back-link, .logout-btn, .home-btn { 
+            color: var(--accent-color); 
+            padding: 6px 12px; 
+            text-decoration: none; 
+            font-size: 14px;
+            transition: opacity 0.2s;
+        }
+        
+        .back-link:hover, .logout-btn:hover, .home-btn:hover { 
+            opacity: 0.8; 
+        }
+        
+        .content {
+            padding-top: 56px;
+            padding-bottom: 20px;
+            background-color: var(--bg-primary);
+        }
+        
+        .edit-container {
+            max-width: 620px;
+            margin: 0 auto;
+            padding: 0 10px;
         }
         
         .edit-form {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 30px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            background-color: var(--card-bg);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .form-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: var(--text-primary);
+            text-align: center;
+        }
+        
+        .post-info {
+            background-color: var(--button-bg);
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-size: 14px;
+            color: var(--text-secondary);
         }
         
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 15px;
         }
         
         .form-group label {
             display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #555;
-            font-size: 0.95rem;
+            margin-bottom: 5px;
+            color: var(--text-primary);
+            font-size: 14px;
         }
         
         textarea, input[type="text"], input[type="file"] {
             width: 100%;
-            padding: 15px;
-            border: 2px solid #e1e8ed;
-            border-radius: 12px;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            background: #fff;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 5px;
+            font-size: 16px;
+            font-family: inherit;
+            background-color: var(--card-bg);
+            color: var(--text-primary);
+        }
+        
+        textarea {
+            height: 120px;
+            resize: vertical;
+            min-height: 100px;
         }
         
         textarea:focus, input:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            border-color: var(--accent-color);
         }
         
-        textarea {
-            height: 200px;
-            resize: vertical;
-            font-family: inherit;
+        .form-help {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            margin-top: 5px;
         }
         
-        .btn-group {
+        .form-actions {
             display: flex;
-            gap: 15px;
-            margin-top: 25px;
+            gap: 10px;
+            margin-top: 20px;
         }
         
         .submit-btn {
-            background: linear-gradient(135deg, #667eea, #764ba2);
+            flex: 1;
+            padding: 10px;
+            background-color: var(--accent-color);
             color: white;
-            padding: 15px 30px;
             border: none;
-            border-radius: 12px;
-            font-size: 1rem;
-            font-weight: 600;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
+            transition: background-color 0.2s;
         }
         
         .submit-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
+            opacity: 0.8;
         }
         
         .cancel-btn {
-            background: #6c757d;
-            color: white;
-            padding: 15px 30px;
+            flex: 1;
+            padding: 10px;
+            background-color: var(--button-bg);
+            color: var(--text-primary);
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
             text-decoration: none;
-            border-radius: 12px;
-            font-size: 1rem;
-            font-weight: 600;
-            transition: all 0.3s ease;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
+            text-align: center;
         }
         
         .cancel-btn:hover {
-            background: #5a6268;
-            transform: translateY(-2px);
+            opacity: 0.8;
         }
         
-        .post-info {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 0.9rem;
-            color: #666;
+        @media (max-width: 620px) {
+            .edit-container {
+                padding: 0;
+            }
+            
+            .edit-form {
+                border-radius: 0;
+                margin-left: -10px;
+                margin-right: -10px;
+            }
         }
+        
+        ${getThemeCSS()}
     </style>
 </head>
 <body>
-    <div class="container">
-        <a href="/admin" class="back-btn">← 返回管理后台</a>
-        
-        <div class="header">
-            <h1>✏️ 编辑动态</h1>
-            <div style="margin-top: 15px;">
-                <a href="/admin/logout" class="logout-btn" style="background: linear-gradient(135deg, #dc3545, #c82333); color: white; padding: 10px 20px; text-decoration: none; border-radius: 8px; font-size: 0.9rem; font-weight: 500; transition: all 0.3s ease; display: inline-flex; align-items: center; gap: 5px;" onclick="return confirm('确定要退出登录吗？')">
-                    🚪 退出登录
-                </a>
-            </div>
-        </div>
-        
-        <div class="edit-form">
-            <div class="post-info">
-                <strong>创建时间：</strong>${post.date}<br>
-                <strong>动态 ID：</strong>${post.id}
-                ${post.updatedAt ? `<br><strong>最后更新：</strong>${post.updatedAt}` : ''}
-            </div>
-            
-            <form method="POST" enctype="multipart/form-data">
-                <div class="form-group">
-                    <label>💭 内容 (支持 Markdown)</label>
-                    <textarea name="content" required>${post.content}</textarea>
-                </div>
-                <div class="form-group">
-                    <label>🏷️ 标签 (用逗号分隔)</label>
-                    <input type="text" name="tags" value="${post.tags.join(', ')}">
-                </div>
-                <div class="form-group">
-                    <label>🖼️ 更换图片 (可选)</label>
-                    <input type="file" name="image" accept="image/*">
-                    <small style="color: #666; font-size: 0.8rem;">如果不选择新图片，将保持原有图片</small>
+    <div class="header">
+        <div class="header-title">编辑动态</div>
+    </div>
+    
+    <div class="header-left">
+        <a href="/admin" class="back-link">返回</a>
+    </div>
+    
+    <div class="header-right">
+        <a href="/" class="home-btn">首页</a>
+        <a href="/admin/logout" class="logout-btn" onclick="return confirm('确定要退出登录吗？')">退出</a>
+    </div>
+    
+    <div class="content">
+        <div class="edit-container">
+            <div class="edit-form">
+                <h3 class="form-title">编辑动态</h3>
+                
+                <div class="post-info">
+                    <div>创建时间: ${post.date}</div>
+                    <div>动态 ID: ${post.id}</div>
+                    ${post.updatedAt ? `<div>最后更新: ${post.updatedAt}</div>` : ''}
                 </div>
                 
-                <div class="btn-group">
-                    <button type="submit" class="submit-btn">
-                        💾 保存更改
-                    </button>
-                    <a href="/admin" class="cancel-btn">
-                        ❌ 取消
-                    </a>
-                </div>
-            </form>
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <textarea name="content" required>${post.content}</textarea>
+                    </div>
+                    
+                    <div class="form-group">
+                        <input type="text" name="tags" value="${post.tags.join(', ')}" placeholder="标签 (用逗号分隔)">
+                    </div>
+                    
+                    <div class="form-group">
+                        <input type="file" name="image" accept="image/*">
+                        <div class="form-help">如果不选择新图片，将保持原有图片</div>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="submit" class="submit-btn">保存</button>
+                        <a href="/admin" class="cancel-btn">取消</a>
+                    </div>
+                </form>
+            </div>
         </div>
     </div>
+    
+    ${getThemeToggleScript()}
+    
+    <!-- 主题切换按钮 -->
+    ${getThemeToggleHTML()}
 </body>
 </html>`;
 }
