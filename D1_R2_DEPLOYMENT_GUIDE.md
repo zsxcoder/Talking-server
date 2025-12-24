@@ -360,6 +360,155 @@ wrangler r2 object info talk 图片文件名.jpg
 
 ---
 
+## API 接口
+
+项目提供 RESTful API 接口，支持跨域访问。
+
+### 获取所有文章
+
+```bash
+GET /api/posts
+```
+
+**响应示例：**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "1735024000000",
+      "title": "",
+      "content": "测试动态",
+      "tags": ["测试"],
+      "date": "2024-12-24 12:00:00",
+      "updatedAt": "2024-12-24 12:00:00"
+    }
+  ],
+  "count": 1
+}
+```
+
+### 获取单篇文章
+
+```bash
+GET /api/posts/:id
+```
+
+**参数：**
+- `id`: 文章 ID
+
+**响应示例：**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "1735024000000",
+    "title": "",
+    "content": "测试动态",
+    "tags": ["测试"],
+    "date": "2024-12-24 12:00:00",
+    "updatedAt": "2024-12-24 12:00:00"
+  }
+}
+```
+
+### 获取统计数据
+
+```bash
+GET /api/stats
+```
+
+**响应示例：**
+
+```json
+{
+  "success": true,
+  "data": {
+    "total_posts": 1,
+    "api_version": "1.0.0"
+  }
+}
+```
+
+### API 健康检查
+
+```bash
+GET /api/health
+```
+
+**响应示例：**
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "healthy",
+    "timestamp": "2024-12-24T12:00:00.000Z",
+    "database_type": "d1"
+  }
+}
+```
+
+### API 错误响应
+
+所有错误响应格式统一：
+
+```json
+{
+  "success": false,
+  "error": "错误信息"
+}
+```
+
+### API 使用示例
+
+#### JavaScript Fetch
+
+```javascript
+// 获取所有文章
+const response = await fetch('https://你的域名/api/posts');
+const result = await response.json();
+
+if (result.success) {
+  console.log('文章列表：', result.data);
+  console.log('总数：', result.count);
+}
+```
+
+#### cURL
+
+```bash
+# 获取所有文章
+curl https://你的域名/api/posts
+
+# 获取单篇文章
+curl https://你的域名/api/posts/1735024000000
+
+# 获取统计数据
+curl https://你的域名/api/stats
+
+# 健康检查
+curl https://你的域名/api/health
+```
+
+#### Python Requests
+
+```python
+import requests
+
+# 获取所有文章
+response = requests.get('https://你的域名/api/posts')
+result = response.json()
+
+if result['success']:
+    for post in result['data']:
+        print(f"{post['date']}: {post['content'][:50]}...")
+```
+
+---
+
 ## 常见问题
 
 ### Q1: 如何切换到 KV 数据库？
