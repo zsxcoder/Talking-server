@@ -27,13 +27,15 @@ export default {
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
-    
+
     // 处理 OPTIONS 请求
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
-    
+
     try {
+      console.log(`[${new Date().toISOString()}] Request: ${request.method} ${path}`);
+
       // 初始化数据库（如果尚未初始化）
       await initializeDatabase(env);
 
@@ -56,8 +58,9 @@ export default {
 
       return handlePublic(request, env, dbWrapper);
     } catch (error) {
-      console.error('Error handling request:', error);
-      return new Response(`服务器错误: ${error.message}`, { 
+      console.error(`[${new Date().toISOString()}] Error handling request:`, error);
+      console.error('Error stack:', error.stack);
+      return new Response(`服务器错误: ${error.message}`, {
         status: 500,
         headers: corsHeaders
       });

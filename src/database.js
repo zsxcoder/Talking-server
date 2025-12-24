@@ -14,7 +14,8 @@ export class D1Database {
       console.log('Initializing D1 database...');
 
       if (!this.db) {
-        throw new Error('D1 database binding (POSTS_D1) is not configured. Please check wrangler.toml');
+        console.warn('POSTS_D1 binding not found, skipping database initialization');
+        return;
       }
 
       // 测试连接
@@ -26,7 +27,7 @@ export class D1Database {
       await this.initializeTables();
     } catch (error) {
       console.error('Failed to initialize D1 database:', error);
-      throw error;
+      // 不抛出错误，允许系统回退到 KV
     }
   }
 
@@ -72,13 +73,18 @@ export class D1Database {
   async getAllPosts() {
     const startTime = Date.now();
     try {
-      const result = await this.db.prepare(`
-        SELECT id, title, content, tags, date, updated_at as "updatedAt"
-        FROM posts
-        ORDER BY date DESC
-      `).all();
+      console.log('Fetching all posts from D1...');
+      const stmt = this.db.prepare('SELECT id, title, content, tags, date, updated_at as "updatedAt" FROM posts ORDER BY date DESC');
+      const result = await stmt.all();
 
       const duration = Date.now() - startTime;
+      console.log(`D1 query result:`, result);
+
+      if (!result || !result.results) {
+        console.log('No results returned, returning empty array');
+        return [];
+      }
+
       console.log(`Fetched ${result.results.length} posts from D1 in ${duration}ms`);
 
       return result.results.map(row => ({
@@ -87,17 +93,15 @@ export class D1Database {
       }));
     } catch (error) {
       console.error('Error getting all posts from D1:', error);
+      console.error('Error stack:', error.stack);
       return [];
     }
   }
 
   async getPost(postId) {
     try {
-      const result = await this.db.prepare(`
-        SELECT id, title, content, tags, date, updated_at as "updatedAt"
-        FROM posts
-        WHERE id = ?
-      `, [postId]).first();
+      const stmt = this.db.prepare('SELECT id, title, content, tags, date, updated_at as "updatedAt" FROM posts WHERE id = ?');
+      const result = await stmt.bind(postId).first();
 
       if (!result) return null;
 
@@ -113,21 +117,21 @@ export class D1Database {
 
   async createPost(postData) {
     try {
-      const result = await this.db.prepare(`
-        INSERT INTO posts (id, title, content, tags, date)
-        VALUES (?, ?, ?, ?, ?)
-      `, [
+      console.log('Creating post in D1:', postData);
+      const stmt = this.db.prepare('INSERT INTO posts (id, title, content, tags, date) VALUES (?, ?, ?, ?, ?)');
+      const result = await stmt.bind(
         postData.id,
         postData.title || '',
         postData.content,
         JSON.stringify(postData.tags || []),
         postData.date
-      ]).run();
+      ).run();
 
-      console.log('Created post in D1:', postData.id);
+      console.log('Created post in D1:', postData.id, 'Result:', result);
       return postData;
     } catch (error) {
       console.error('Error creating post in D1:', error);
+      console.error('Error stack:', error.stack);
       throw error;
     }
   }
@@ -143,9 +147,14 @@ export class D1Database {
       console.log('Checking post count in D1, max allowed:', maxPosts);
 
       // 查询总数
-      const countResult = await this.db.prepare(`
-        SELECT COUNT(*) as count FROM posts
-      `).first();
+      const countStmt = this.db.prepare('SELECT COUNT(*) as count FROM posts');
+      const countResult = await countStmt.first();
+
+      if (!countResult || countResult.count === null || countResult.count === undefined) {
+        console.error('Count query returned invalid result:', countResult);
+        return;
+      }
+
       const totalCount = parseInt(countResult.count);
 
       console.log(`Current post count: ${totalCount}`);
@@ -156,20 +165,21 @@ export class D1Database {
         console.log(`Cleaning up ${postsToDelete} old posts (keeping ${maxPosts} newest)`);
 
         // 查询要删除的文章 ID（最旧的）
-        const oldPosts = await this.db.prepare(`
-          SELECT id, date FROM posts
-          ORDER BY date ASC
-          LIMIT ?
-        `, [postsToDelete]).all();
+        const oldPostsStmt = this.db.prepare('SELECT id, date FROM posts ORDER BY date ASC LIMIT ?');
+        const oldPosts = await oldPostsStmt.bind(postsToDelete).all();
+
+        if (!oldPosts || !oldPosts.results || oldPosts.results.length === 0) {
+          console.log('No old posts to delete');
+          return;
+        }
 
         console.log(`Found ${oldPosts.results.length} posts to delete`);
 
         // 批量删除
         for (const post of oldPosts.results) {
           try {
-            await this.db.prepare(`
-              DELETE FROM posts WHERE id = ?
-            `, [post.id]).run();
+            const deleteStmt = this.db.prepare('DELETE FROM posts WHERE id = ?');
+            await deleteStmt.bind(post.id).run();
             console.log(`Deleted old post: ${post.id} from ${post.date}`);
           } catch (deleteError) {
             console.error(`Failed to delete post ${post.id}:`, deleteError);
@@ -182,24 +192,22 @@ export class D1Database {
       }
     } catch (error) {
       console.error('Error cleaning up old posts in D1:', error);
+      console.error('Error stack:', error.stack);
       // 不影响文章创建，只是记录错误
     }
   }
 
   async updatePost(postId, updateData) {
     try {
-      const result = await this.db.prepare(`
-        UPDATE posts
-        SET title = ?, content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [
+      const stmt = this.db.prepare('UPDATE posts SET title = ?, content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?');
+      const result = await stmt.bind(
         updateData.title || '',
         updateData.content,
         JSON.stringify(updateData.tags || []),
         postId
-      ]).run();
+      ).run();
 
-      if (result.meta.changes === 0) return null;
+      if (!result?.meta || result.meta.changes === 0) return null;
 
       console.log('Updated post in D1:', postId);
       return await this.getPost(postId);
@@ -211,9 +219,8 @@ export class D1Database {
 
   async deletePost(postId) {
     try {
-      const result = await this.db.prepare(`
-        DELETE FROM posts WHERE id = ?
-      `, [postId]).run();
+      const stmt = this.db.prepare('DELETE FROM posts WHERE id = ?');
+      const result = await stmt.bind(postId).run();
 
       const deleted = result.meta.changes > 0;
       console.log(`${deleted ? 'Deleted' : 'Not found'} post in D1: ${postId}`);
@@ -229,10 +236,8 @@ export class D1Database {
     try {
       const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
 
-      await this.db.prepare(`
-        INSERT INTO sessions (token, username, expires_at)
-        VALUES (?, ?, ?)
-      `, [token, username, expiresAt]).run();
+      const stmt = this.db.prepare('INSERT INTO sessions (token, username, expires_at) VALUES (?, ?, ?)');
+      await stmt.bind(token, username, expiresAt).run();
 
       console.log('Created session in D1 for user:', username);
       return true;
@@ -247,20 +252,13 @@ export class D1Database {
       // 清理过期会话
       await this.cleanupExpiredSessions();
 
-      const result = await this.db.prepare(`
-        SELECT token, username, created_at, last_accessed, expires_at
-        FROM sessions
-        WHERE token = ? AND expires_at > datetime('now')
-      `, [token]).first();
+      const stmt = this.db.prepare('SELECT token, username, created_at, last_accessed, expires_at FROM sessions WHERE token = ? AND expires_at > datetime("now")');
+      const result = await stmt.bind(token).first();
 
       if (!result) return null;
 
       // 更新最后访问时间（异步，不阻塞请求）
-      this.db.prepare(`
-        UPDATE sessions
-        SET last_accessed = CURRENT_TIMESTAMP
-        WHERE token = ?
-      `, [token]).run().catch(err => console.error('Error updating last accessed:', err));
+      this.db.prepare('UPDATE sessions SET last_accessed = CURRENT_TIMESTAMP WHERE token = ?').bind(token).run().catch(err => console.error('Error updating last accessed:', err));
 
       return {
         username: result.username,
@@ -275,11 +273,8 @@ export class D1Database {
 
   async updateSession(token, updateData) {
     try {
-      const result = await this.db.prepare(`
-        UPDATE sessions
-        SET last_accessed = CURRENT_TIMESTAMP
-        WHERE token = ?
-      `, [token]).run();
+      const stmt = this.db.prepare('UPDATE sessions SET last_accessed = CURRENT_TIMESTAMP WHERE token = ?');
+      const result = await stmt.bind(token).run();
 
       return result.meta.changes > 0;
     } catch (error) {
@@ -290,9 +285,8 @@ export class D1Database {
 
   async deleteSession(token) {
     try {
-      const result = await this.db.prepare(`
-        DELETE FROM sessions WHERE token = ?
-      `, [token]).run();
+      const stmt = this.db.prepare('DELETE FROM sessions WHERE token = ?');
+      const result = await stmt.bind(token).run();
 
       const deleted = result.meta.changes > 0;
       console.log(`${deleted ? 'Deleted' : 'Not found'} session in D1: ${token.substring(0, 8)}...`);
@@ -305,10 +299,8 @@ export class D1Database {
 
   async cleanupExpiredSessions() {
     try {
-      const result = await this.db.prepare(`
-        DELETE FROM sessions
-        WHERE expires_at <= datetime('now')
-      `).run();
+      const stmt = this.db.prepare('DELETE FROM sessions WHERE expires_at <= datetime("now")');
+      const result = await stmt.run();
 
       if (result.meta.changes > 0) {
         console.log(`Cleaned up ${result.meta.changes} expired sessions from D1`);
@@ -324,21 +316,11 @@ export class D1Database {
   // 数据库统计和监控
   async getStats() {
     try {
-      const postsResult = await this.db.prepare(`
-        SELECT COUNT(*) as total_posts FROM posts
-      `).first();
+      const postsResult = await this.db.prepare('SELECT COUNT(*) as total_posts FROM posts').first();
 
-      const sessionsResult = await this.db.prepare(`
-        SELECT COUNT(*) as active_sessions
-        FROM sessions
-        WHERE expires_at > datetime('now')
-      `).first();
+      const sessionsResult = await this.db.prepare('SELECT COUNT(*) as active_sessions FROM sessions WHERE expires_at > datetime("now")').first();
 
-      const expiredResult = await this.db.prepare(`
-        SELECT COUNT(*) as expired_sessions
-        FROM sessions
-        WHERE expires_at <= datetime('now')
-      `).first();
+      const expiredResult = await this.db.prepare('SELECT COUNT(*) as expired_sessions FROM sessions WHERE expires_at <= datetime("now")').first();
 
       return {
         posts: {
@@ -775,8 +757,13 @@ export function createDatabaseAdapter(env) {
 
   switch (dbType.toLowerCase()) {
     case 'd1':
-      console.log('Using Cloudflare D1 adapter');
-      return new D1Database(env);
+      if (env.POSTS_D1) {
+        console.log('Using Cloudflare D1 adapter');
+        return new D1Database(env);
+      } else {
+        console.warn('POSTS_D1 binding not found, falling back to KV');
+        return null;
+      }
 
     case 'neon':
     case 'postgresql':
@@ -799,7 +786,12 @@ export class DatabaseWrapper {
 
   async initialize() {
     if (this.adapter) {
-      await this.adapter.initialize();
+      try {
+        await this.adapter.initialize();
+      } catch (error) {
+        console.error('Database adapter initialization failed:', error);
+        // 不抛出错误，允许系统回退到 KV
+      }
     }
   }
 

@@ -168,11 +168,154 @@ function getPublicHTML(posts) {
             word-wrap: break-word;
         }
         
-        .post-content img { 
-            max-width: 100%; 
+        /* 图片九宫格容器 */
+        .image-grid {
+            display: grid;
+            gap: 4px;
+            margin-top: 10px;
+            border-radius: 6px;
+            overflow: hidden;
+            width: 100%;
+        }
+
+        .image-grid.grid-1 {
+            width: 33%;
+        }
+
+        /* 根据图片数量设置网格布局 */
+        .image-grid.grid-1 { grid-template-columns: 1fr; }
+        .image-grid.grid-2 { grid-template-columns: repeat(2, 1fr); }
+        .image-grid.grid-3 { grid-template-columns: repeat(3, 1fr); }
+        .image-grid.grid-4 { grid-template-columns: repeat(2, 1fr); }
+        .image-grid.grid-5,
+        .image-grid.grid-6 { grid-template-columns: repeat(3, 1fr); }
+        .image-grid.grid-7,
+        .image-grid.grid-8,
+        .image-grid.grid-9 { grid-template-columns: repeat(3, 1fr); }
+
+        /* 单张大图样式 */
+        .image-grid.grid-1 img {
+            max-width: 33%;
+            max-height: 500px;
+            object-fit: contain;
+        }
+
+        /* 多张图片样式 */
+        .image-grid:not(.grid-1) img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+        }
+
+        .image-grid img {
+            border-radius: 4px;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin: 0 !important;
+            display: block !important;
+        }
+
+        .image-grid img:hover {
+            transform: scale(1.02);
+        }
+
+        /* 不在九宫格中的图片样式 */
+        .post-content > p > img,
+        .post-content > img {
+            max-width: 100%;
             border-radius: 6px;
             margin: 10px 0;
-            display: block;
+            cursor: pointer;
+        }
+
+        /* Lightbox 灯箱样式 */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .lightbox.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .lightbox-content {
+            max-width: 90%;
+            max-height: 90%;
+            object-fit: contain;
+            cursor: zoom-in;
+            transition: transform 0.3s ease;
+        }
+
+        .lightbox.zoomed .lightbox-content {
+            max-width: 95%;
+            max-height: 95%;
+            transform: scale(1.5);
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 40px;
+            color: white;
+            cursor: pointer;
+            z-index: 10000;
+            user-select: none;
+            line-height: 1;
+        }
+
+        .lightbox-close:hover {
+            opacity: 0.8;
+        }
+
+        .lightbox-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 40px;
+            color: white;
+            cursor: pointer;
+            z-index: 10000;
+            user-select: none;
+            padding: 20px;
+            line-height: 1;
+        }
+
+        .lightbox-prev {
+            left: 10px;
+        }
+
+        .lightbox-next {
+            right: 10px;
+        }
+
+        .lightbox-nav:hover {
+            opacity: 0.8;
+        }
+
+        .lightbox-nav.hidden {
+            display: none;
+        }
+
+        .lightbox-counter {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 14px;
+            z-index: 10000;
         }
         
         .post-content h1, .post-content h2, .post-content h3 {
@@ -290,12 +433,138 @@ function getPublicHTML(posts) {
     </div>
 
     <script>
-        // 渲染 Markdown 内容
-        document.querySelectorAll('.post-content').forEach(element => {
-            const markdown = decodeURIComponent(element.dataset.markdown);
-            element.innerHTML = marked.parse(markdown);
+        // 创建 Lightbox 灯箱
+        const lightbox = document.createElement('div');
+        lightbox.className = 'lightbox';
+        lightbox.innerHTML = '<span class="lightbox-close">&times;</span>' +
+            '<span class="lightbox-nav lightbox-prev">&lt;</span>' +
+            '<span class="lightbox-nav lightbox-next">&gt;</span>' +
+            '<img class="lightbox-content" src="">' +
+            '<span class="lightbox-counter"></span>';
+        document.body.appendChild(lightbox);
+
+        let currentImages = [];
+        let currentIndex = 0;
+
+        function openLightbox(src) {
+            lightbox.classList.add('active');
+            document.body.style.overflow = 'hidden';
+            updateLightboxImage(src);
+            updateNavigation();
+        }
+
+        function closeLightbox() {
+            lightbox.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        function updateLightboxImage(src) {
+            const content = lightbox.querySelector('.lightbox-content');
+            content.src = src;
+        }
+
+        function updateNavigation() {
+            const prev = lightbox.querySelector('.lightbox-prev');
+            const next = lightbox.querySelector('.lightbox-next');
+            const counter = lightbox.querySelector('.lightbox-counter');
+
+            prev.classList.toggle('hidden', currentIndex === 0);
+            next.classList.toggle('hidden', currentIndex === currentImages.length - 1);
+            counter.textContent = currentImages.length > 1 ? (currentIndex + 1) + ' / ' + currentImages.length : '';
+        }
+
+        function showPrev() {
+            if (currentIndex > 0) {
+                currentIndex--;
+                updateLightboxImage(currentImages[currentIndex].src);
+                updateNavigation();
+            }
+        }
+
+        function showNext() {
+            if (currentIndex < currentImages.length - 1) {
+                currentIndex++;
+                updateLightboxImage(currentImages[currentIndex].src);
+                updateNavigation();
+            }
+        }
+
+        // 图片点击处理
+        function handleImageClick(e) {
+            e.preventDefault();
+            const img = this;
+            const grid = img.closest('.image-grid');
+            if (grid) {
+                currentImages = Array.from(grid.querySelectorAll('img'));
+            } else {
+                currentImages = [img];
+            }
+            currentIndex = currentImages.indexOf(img);
+            openLightbox(img.src);
+        }
+
+        // Lightbox 事件监听
+        lightbox.querySelector('.lightbox-close').addEventListener('click', closeLightbox);
+        lightbox.querySelector('.lightbox-prev').addEventListener('click', showPrev);
+        lightbox.querySelector('.lightbox-next').addEventListener('click', showNext);
+
+        lightbox.addEventListener('click', function(e) {
+            if (e.target === lightbox) {
+                closeLightbox();
+            }
         });
-        
+
+        // 点击图片切换缩放
+        lightbox.querySelector('.lightbox-content').addEventListener('click', function(e) {
+            e.stopPropagation();
+            lightbox.classList.toggle('zoomed');
+        });
+
+        // 键盘导航
+        document.addEventListener('keydown', function(e) {
+            if (!lightbox.classList.contains('active')) return;
+            if (e.key === 'Escape') closeLightbox();
+            if (e.key === 'ArrowLeft') showPrev();
+            if (e.key === 'ArrowRight') showNext();
+        });
+
+        // 处理图片九宫格
+        function processImages(contentElement) {
+            const images = contentElement.querySelectorAll('img');
+            if (images.length === 0) return;
+
+            // 收集所有图片
+            const allImages = Array.from(images);
+
+            // 创建九宫格容器
+            const gridClass = 'grid-' + Math.min(allImages.length, 9);
+            const grid = document.createElement('div');
+            grid.className = 'image-grid ' + gridClass;
+
+            // 将所有图片移动到九宫格容器
+            allImages.forEach(img => {
+                grid.appendChild(img);
+                img.addEventListener('click', handleImageClick);
+            });
+
+            // 将九宫格添加到内容末尾
+            contentElement.appendChild(grid);
+        }
+
+        // 初始化页面
+        function initPage() {
+            // 渲染 Markdown 内容
+            document.querySelectorAll('.post-content').forEach(element => {
+                const markdown = decodeURIComponent(element.dataset.markdown);
+                element.innerHTML = marked.parse(markdown);
+            });
+
+            // 图片九宫格处理
+            document.querySelectorAll('.post-content').forEach(element => {
+                processImages(element);
+            });
+        }
+
         // 初始化 more-options 图标颜色
         function updateMoreOptionsIcon() {
             const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
@@ -305,13 +574,14 @@ function getPublicHTML(posts) {
                 el.style.backgroundImage = svgUrl;
             });
         }
-        
+
         // 监听主题切换事件
         const observer = new MutationObserver(updateMoreOptionsIcon);
         observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-        
-        // 初始设置图标
+
+        // 初始设置
         updateMoreOptionsIcon();
+        initPage();
     </script>
     
     ${getThemeToggleScript()}
