@@ -146,7 +146,10 @@ async function handleCreatePost(request, env, dbWrapper = null) {
   const image = formData.get('image');
 
   const postId = Date.now().toString();
-  const date = new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19);
+  // 使用北京时间（Asia/Shanghai）
+  const now = new Date();
+  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  const date = beijingTime.toISOString().replace('T', ' ').slice(0, 19);
 
   let finalContent = content;
 
@@ -187,15 +190,17 @@ async function handleCreatePost(request, env, dbWrapper = null) {
     content: finalContent
   };
 
-  // 如果使用 KV，自动清理旧文章（只保留最新的20篇）
-  if (!dbWrapper) {
-    await cleanupOldPosts(env.POSTS_KV, 20);
-  }
-
+  // 发布文章
   if (dbWrapper) {
     await dbWrapper.createPost(postData);
+    // D1 数据库自动清理旧文章（只保留最新的30篇）
+    if (dbWrapper.adapter && typeof dbWrapper.adapter.cleanupOldPosts === 'function') {
+      await dbWrapper.adapter.cleanupOldPosts(30);
+    }
   } else {
     await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
+    // KV 自动清理旧文章（只保留最新的30篇）
+    await cleanupOldPosts(env.POSTS_KV, 30);
   }
 
   // 清除缓存，确保新文章立即可见
@@ -251,13 +256,23 @@ async function handleUpdatePost(request, env, postId, dbWrapper = null) {
     ...existingPost,
     tags: tags,
     content: finalContent,
-    updatedAt: new Date().toLocaleString('sv-SE').replace('T', ' ').slice(0, 19)
+    updatedAt: (() => {
+      const now = new Date();
+      const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+      return beijingTime.toISOString().replace('T', ' ').slice(0, 19);
+    })()
   };
 
   if (dbWrapper) {
     await dbWrapper.updatePost(postId, updatedPost);
+    // D1 数据库自动清理旧文章（只保留最新的30篇）
+    if (dbWrapper.adapter && typeof dbWrapper.adapter.cleanupOldPosts === 'function') {
+      await dbWrapper.adapter.cleanupOldPosts(30);
+    }
   } else {
     await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
+    // KV 自动清理旧文章（只保留最新的30篇）
+    await cleanupOldPosts(env.POSTS_KV, 30);
   }
 
   // 清除缓存，确保更新立即可见

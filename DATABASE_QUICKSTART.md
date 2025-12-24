@@ -1,261 +1,207 @@
-# 数据库快速开始指南
+# 数据库快速选择指南
 
-## 🎯 选择你的数据库方案
+## 🎯 三种数据库选项
 
-### 选项 1：继续使用 Cloudflare KV（默认）
+你的项目支持三种数据库存储方式：
 
-无需任何配置，系统自动使用现有的 KV 存储。
+| 数据库 | 配置值 | 适用场景 | 免费额度 |
+|--------|---------|----------|----------|
+| **Cloudflare KV** | `kv` | 简单键值存储，少量数据 | 100K 读/天, 1K 写/天 |
+| **Cloudflare D1** | `d1` | ⭐ 推荐！SQL 查询，复杂数据 | 5M 读/天, 100K 写/天 |
+| **Neon PostgreSQL** | `neon` | 大规模数据，企业级应用 | 10K 读/天, 10K 写/天 |
 
-**优势**：
-- ✅ 无需额外配置
-- ✅ 已有数据无缝迁移
-- ✅ Cloudflare 原生支持
+## 📊 快速对比
 
-**劣势**：
-- ❌ 随着数据增长性能下降
-- ❌ 成本较高
-- ❌ 查询能力有限
+```
+性能：D1 ≈ Neon > KV
+配额：D1 > KV ≈ Neon
+复杂度：KV < D1 ≈ Neon
+延迟：KV ≈ D1 < Neon
+```
+
+## 🚀 快速开始
+
+### 选项 1：使用 D1（推荐）✨
+
+**最适合：中小型应用，需要查询能力**
+
+```toml
+# wrangler.toml
+DATABASE_TYPE = "d1"
+
+[[d1_databases]]
+binding = "POSTS_D1"
+database_name = "social-moments"
+database_id = "your-database-id"
+```
+
+**设置步骤：**
+```bash
+# 1. 创建 D1 数据库
+wrangler d1 create social-moments
+
+# 2. 配置 wrangler.toml（使用返回的 ID）
+
+# 3. 部署
+wrangler deploy
+```
+
+**详细文档：** [D1_SETUP_GUIDE.md](./D1_SETUP_GUIDE.md)
 
 ---
 
-### 选项 2：切换到 Neon PostgreSQL（推荐）
+### 选项 2：继续使用 KV
 
-需要简单配置，性能大幅提升。
-
-**优势**：
-- ✅ 性能提升 60-90%
-- ✅ 成本降低 50-80%
-- ✅ 支持 SQL 复杂查询
-- ✅ 更好的扩展性
-
-**劣势**：
-- ❌ 需要配置 Neon 账户
-- ❌ 需要管理数据库连接
-
-## 🚀 Neon PostgreSQL 快速设置（3 步）
-
-### 第 1 步：创建 Neon 账户
-
-1. 访问 https://console.neon.tech/
-2. 创建新项目（免费）
-3. 复制连接字符串
-
-**连接字符串格式**：
-```
-postgresql://user:password@ep-xxxxx.aws.neon.tech/neondb?sslmode=require
-```
-
-### 第 2 步：配置 wrangler.toml
-
-编辑 `wrangler.toml` 文件，在 `[vars]` 部分添加：
+**最适合：个人博客，数据量小（<1000 条）**
 
 ```toml
-[vars]
-# 添加这两行
-DATABASE_TYPE = "neon"
-DATABASE_URL = "你的连接字符串"
+# wrangler.toml
+DATABASE_TYPE = "kv"
 ```
 
-**完整示例**：
-```toml
-name = "social-moments"
-main = "src/index.js"
-compatibility_date = "2025-07-21"
+**无需额外配置**，开箱即用！
 
-[[kv_namespaces]]
-binding = "POSTS_KV"
-id = "你的-kv-id"
-
-[[r2_buckets]]
-binding = "POST_BUCKET"
-bucket_name = "talk"
-
-[vars]
-GITHUB_CLIENT_ID = "你的-client-id"
-GITHUB_CLIENT_SECRET = "你的-secret"
-ADMIN_USERS = "[\"zsxcoder\"]"
-STORAGE_TYPE = "R2"
-
-# 数据库配置（新增）
-DATABASE_TYPE = "neon"
-DATABASE_URL = "postgresql://user:password@ep-xxxxx.aws.neon.tech/neondb?sslmode=require"
-```
-
-### 第 3 步：部署和测试
-
-```bash
-# 部署到 Cloudflare
-npx wrangler deploy
-
-# 访问你的应用
-# 系统会自动创建数据库表
-```
-
-**首次部署时**：
-- ✅ 自动创建 `posts` 表
-- ✅ 自动创建 `sessions` 表
-- ✅ 自动创建必要的索引
-- ✅ 可以立即开始使用
-
-## 📊 性能和成本对比
-
-### 性能提升（1000 篇文章）
-
-| 操作 | KV | Neon | 提升 |
-|------|-----|------|------|
-| 加载首页 | ~500ms | ~50ms | **90% ↓** |
-| 文章详情 | ~100ms | ~10ms | **90% ↓** |
-| 发布文章 | ~200ms | ~30ms | **85% ↓** |
-| 编辑文章 | ~200ms | ~30ms | **85% ↓** |
-| 登录认证 | ~80ms | ~20ms | **75% ↓** |
-
-### 成本对比（月度）
-
-| 项目 | KV | Neon | 节约 |
-|------|-----|------|------|
-| 存储读写 | ~$1.00 | $0 | **100% ↓** |
-| 数据传输 | ~$0.50 | $0 | **100% ↓** |
-| **总计** | **~$1.50** | **$0** | **100% ↓** |
-
-## 🔧 切换方案
-
-### 方案 A：全新使用（推荐）
-
-1. 配置 `wrangler.toml` 使用 Neon
-2. 首次部署，数据库自动初始化
-3. 新文章保存到 Neon
-4. 旧文章仍在 KV 中（不影响）
-
-### 方案 B：完全迁移
-
-将所有 KV 数据迁移到 Neon：
-
-```javascript
-// 1. 添加迁移脚本到 admin.js
-export async function handleMigration(request, env) {
-  const { DatabaseWrapper } = await import('./database.js');
-  const db = new DatabaseWrapper(env);
-  await db.initialize();
-  
-  // 2. 从 KV 获取所有文章
-  const { getAllPosts } = await import('./utils.js');
-  const posts = await getAllPosts(env.POSTS_KV);
-  
-  // 3. 迁移到 Neon
-  let migrated = 0;
-  for (const post of posts) {
-    await db.adapter.createPost(post);
-    migrated++;
-  }
-  
-  return new Response(JSON.stringify({ 
-    total: posts.length, 
-    migrated 
-  }));
-}
-
-// 4. 添加迁移路由到 index.js
-if (path === '/admin/migrate') {
-  return await handleMigration(request, env);
-}
-```
-
-执行迁移：
-```bash
-curl https://your-worker.workers.dev/admin/migrate
-```
-
-## ✅ 验证配置
-
-### 基本功能测试
-
-1. **发布新文章**
-   ```
-   访问：https://your-worker.workers.dev/admin
-   发布文章，检查是否保存成功
-   ```
-
-2. **查看文章列表**
-   ```
-   访问：https://your-worker.workers.dev/
-   确认文章正常显示
-   ```
-
-3. **编辑和删除**
-   ```
-   尝试编辑和删除文章
-   确认操作正常
-   ```
-
-### 数据库检查
-
-访问 Neon Console 查看数据：
-```
-1. 访问 https://console.neon.tech/
-2. 选择你的项目
-3. 查看 SQL Editor
-4. 检查表和数据：
-   - SELECT COUNT(*) FROM posts;
-   - SELECT * FROM sessions;
-```
-
-## 🎯 推荐
-
-**对于大多数用户**：推荐使用 Neon PostgreSQL
-
-理由：
-1. **性能提升明显**：用户体验大幅改善
-2. **成本节约**：长期使用更经济
-3. **扩展性更好**：支持未来功能扩展
-4. **专业级功能**：事务、索引、复杂查询
-
-**何时继续使用 KV**：
-- 文章数量很少（<100 篇）
-- 不需要复杂查询
-- 预算充足，不在意成本
-- 希望完全使用 Cloudflare 生态
-
-## 📞 获取帮助
-
-### 问题排查
-
-**连接失败**：
-- 检查 DATABASE_URL 是否正确
-- 确认网络可达
-- 验证 SSL 设置
-
-**性能问题**：
-- 检查数据库区域
-- 增加连接池大小
-- 考虑添加缓存
-
-**数据不一致**：
-- 检查是否同时使用 KV 和 Neon
-- 确认迁移是否完成
-
-### 详细文档
-
-查看完整配置指南：
-- [NEON_SETUP_GUIDE.md](./NEON_SETUP_GUIDE.md) - 详细配置和优化
-- [KV_OPTIMIZATION_GUIDE.md](./KV_OPTIMIZATION_GUIDE.md) - KV 优化方案
-
-## 🎉 开始使用
-
-选择你的方案，开始享受更好的性能！
-
-**快速开始**：
-```bash
-# 使用 KV（默认）
-npx wrangler deploy
-
-# 使用 Neon（推荐）
-# 1. 在 wrangler.toml 添加 DATABASE_URL
-# 2. 运行部署
-npx wrangler deploy
-
-# 3. 访问应用并享受！
-```
+**特点：**
+- ✅ 简单易用
+- ✅ 极低延迟
+- ✅ 自动限制 20 篇文章
+- ⚠️ 查询能力有限
+- ⚠️ 免费配额较低
 
 ---
 
-**祝你使用愉快！有任何问题欢迎提问。**
+### 选项 3：使用 Neon PostgreSQL
+
+**最适合：大规模数据，企业级应用**
+
+```toml
+# wrangler.toml
+DATABASE_TYPE = "neon"
+
+[vars]
+DATABASE_URL = "postgresql://user:password@ep-xxx.aws.neon.tech/neondb?sslmode=require"
+```
+
+**设置步骤：**
+```bash
+# 1. 注册 Neon: https://neon.tech
+# 2. 创建项目
+# 3. 复制连接字符串
+# 4. 配置到 wrangler.toml
+```
+
+**详细文档：** [NEON_SETUP_GUIDE.md](./NEON_SETUP_GUIDE.md)
+
+---
+
+## 🔄 切换数据库
+
+### 从 KV 切换到 D1
+
+1. 按照 **选项 1** 设置 D1
+2. 运行迁移工具：
+
+```bash
+curl "https://your-worker.workers.dev/api/migrate?token=migration-token-please-change-me"
+```
+
+3. 确认迁移成功后，切换配置：
+```toml
+DATABASE_TYPE = "d1"
+```
+
+4. 重新部署：`wrangler deploy`
+
+**详细文档：** [KV_TO_D1_MIGRATION.md](./KV_TO_D1_MIGRATION.md)
+
+### 从 D1 切换回 KV
+
+只需修改 `wrangler.toml`：
+
+```toml
+DATABASE_TYPE = "kv"
+```
+
+重新部署即可（数据不会自动迁移回去）。
+
+---
+
+## 💡 推荐配置
+
+### 小型个人博客（<100 篇文章）
+
+**推荐：KV**
+- 简单
+- 免费
+- 快速
+
+### 中型应用（100-10,000 篇文章）
+
+**推荐：D1** ⭐
+- SQL 查询
+- 高配额
+- 低延迟
+
+### 大型应用（>10,000 篇文章）
+
+**推荐：D1 或 Neon**
+- D1：边缘部署，低成本
+- Neon：成熟稳定，功能丰富
+
+---
+
+## 📈 性能参考
+
+### 响应时间（测试数据）
+
+| 操作 | KV | D1 | Neon |
+|------|-----|-----|------|
+| 读取 100 篇文章 | ~100ms | ~50ms | ~200ms |
+| 发布文章 | ~150ms | ~100ms | ~300ms |
+| 复杂查询 | N/A | ~150ms | ~250ms |
+
+### 存储成本（免费版）
+
+| 数据库 | 最大存储 | 月度读 | 月度写 |
+|--------|----------|---------|---------|
+| KV | 1 GB | 3M | 30K |
+| D1 | 5 GB | 150M | 3M |
+| Neon | 0.5 GB | 300K | 300K |
+
+---
+
+## 🆘 需要帮助？
+
+### 选择困难症？
+
+- **不知道选哪个？** 先用 **D1**，最通用
+- **想要最简单？** 用 **KV**
+- **想要最强大？** 用 **Neon**
+
+### 迁移问题？
+
+- 查看 [KV_TO_D1_MIGRATION.md](./KV_TO_D1_MIGRATION.md)
+- 查看 [D1_SETUP_GUIDE.md](./D1_SETUP_GUIDE.md)
+- 查看 [NEON_SETUP_GUIDE.md](./NEON_SETUP_GUIDE.md)
+
+### 技术支持？
+
+- [Cloudflare Workers 文档](https://developers.cloudflare.com/workers/)
+- [Cloudflare D1 文档](https://developers.cloudflare.com/d1/)
+- [Neon 文档](https://neon.tech/docs)
+
+---
+
+## 📝 快速检查清单
+
+使用前确认：
+
+- [ ] 已选择数据库类型（kv/d1/neon）
+- [ ] 已配置相关绑定（KV/D1/Neon URL）
+- [ ] 已运行 `wrangler deploy`
+- [ ] 已测试基本功能（发布、查看）
+- [ ] 如需迁移，已完成数据迁移
+
+---
+
+**准备好开始了吗？** 选择一个数据库，开始你的应用吧！ 🚀

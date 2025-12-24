@@ -1,16 +1,16 @@
-# KV 自动清理功能说明
+# KV & D1 自动清理功能说明
 
 ## 🎯 功能概述
 
-实现了自动清理旧说说功能，确保只保留最新的 20 篇文章，超过的部分会自动删除。
+实现了自动清理旧说说功能，确保只保留最新的 30 篇文章，超过的部分会自动删除。
 
 ## 📋 工作原理
 
 ### 清理触发时机
 
 在以下情况下会自动清理：
-1. **发布新文章时** - 检查总数，超过20篇则清理最旧的
-2. **更新文章时** - 检查总数，超过20篇则清理最旧的
+1. **发布新文章时** - 检查总数，超过30篇则清理最旧的
+2. **更新文章时** - 检查总数，超过30篇则清理最旧的
 
 ### 清理策略
 
@@ -23,20 +23,25 @@
 
 1. 获取所有文章数据
 2. 按时间倒序排列（最新的在前）
-3. 如果总数 > 20，删除第21篇及以后的所有文章
-4. 保留最新的20篇文章
+3. 如果总数 > 30，删除第31篇及以后的所有文章
+4. 保留最新的30篇文章
+
+### 时区设置
+
+所有时间使用 **北京时间（Asia/Shanghai，UTC+8）**。
 
 ## 🚀 实现细节
 
 ### 清理函数位置
 
-**文件**：`src/admin.js`
-**函数**：`cleanupOldPosts(kv, maxPosts = 20)`
+**文件**：
+- KV: `src/admin.js` → `cleanupOldPosts(kv, maxPosts = 30)`
+- D1: `src/database.js` → `D1Database.cleanupOldPosts(maxPosts = 30)`
 
 ### 核心代码
 
 ```javascript
-async function cleanupOldPosts(kv, maxPosts = 20) {
+async function cleanupOldPosts(kv, maxPosts = 30) {
   // 1. 获取所有文章
   const list = await kv.list({ prefix: 'post:' });
   
@@ -70,11 +75,17 @@ async function cleanupOldPosts(kv, maxPosts = 20) {
 
 ### 集成位置
 
-在 `handleCreatePost` 函数中：
+在 `handleCreatePost` 和 `handleUpdatePost` 函数中：
+
 ```javascript
-// 发布新文章时触发清理
+// KV 模式
 if (!dbWrapper) {
-  await cleanupOldPosts(env.POSTS_KV, 20);
+  await cleanupOldPosts(env.POSTS_KV, 30);
+}
+
+// D1 模式
+if (dbWrapper && dbWrapper.adapter) {
+  await dbWrapper.adapter.cleanupOldPosts(30);
 }
 ```
 
@@ -84,7 +95,7 @@ if (!dbWrapper) {
 
 | 指标 | 清理前 | 清理后 | 提升 |
 |------|--------|--------|------|
-| KV 键数量 | 无限制 | 最大20 | **显著 ↓** |
+| KV/D1 键数量 | 无限制 | 最大30 | **显著 ↓** |
 | 列表查询时间 | ~500ms | ~100ms | **80% ↓** |
 | 存储空间 | 持续增长 | 固定 | **稳定** |
 | 读取速度 | 随数量下降 | 稳定快速 | **显著 ↑** |
@@ -106,15 +117,20 @@ if (!dbWrapper) {
 如果需要修改保留的文章数量，编辑 `src/admin.js`：
 
 ```javascript
-// 在 handleCreatePost 函数中修改
-await cleanupOldPosts(env.POSTS_KV, 30); // 改为30篇
+// KV 模式：在 handleCreatePost 函数中修改
+await cleanupOldPosts(env.POSTS_KV, 50); // 改为50篇
+
+// D1 模式：修改 database.js 中的默认值或调用参数
+await dbWrapper.adapter.cleanupOldPosts(50); // 改为50篇
 ```
 
 **建议的配置**：
 
-- **小型个人博客**：10-15 篇
-- **中型企业博客**：20-30 篇
-- **大型新闻站**：50-100 篇
+- **小型个人博客**：15-25 篇
+- **中型企业博客**：30-50 篇
+- **大型新闻站**：100-200 篇
+
+**当前默认配置**：30 篇
 
 ### 只清理 KV（不影响 Neon）
 
@@ -139,12 +155,12 @@ if (!dbWrapper) {
 发布新文章时，会在控制台看到：
 
 ```
-Checking post count, max allowed: 20
-Fetched 22 posts from KV
-Cleaning up 2 old posts (keeping 20 newest)
+Checking post count, max allowed: 30
+Fetched 35 posts from KV/D1
+Cleaning up 5 old posts (keeping 30 newest)
 Deleting old post: 1737890123456 from 2024-01-15 10:30:00
 Deleting old post: 1737890123455 from 2024-01-14 15:20:00
-Successfully deleted 2 old posts
+Successfully deleted 5 old posts
 ```
 
 ### 不需要清理时
@@ -152,9 +168,9 @@ Successfully deleted 2 old posts
 如果文章数量在限制内：
 
 ```
-Checking post count, max allowed: 20
-Fetched 18 posts from KV
-Post count (18) within limit (20), no cleanup needed
+Checking post count, max allowed: 30
+Fetched 28 posts from KV/D1
+Post count (28) within limit (30), no cleanup needed
 ```
 
 ## 🚨 注意事项
@@ -221,7 +237,7 @@ curl https://your-worker.workers.dev/api/posts > posts-backup.json
 
 ### 测试步骤
 
-1. **发布第 21 篇文章**
+1. **发布第 31 篇文章**
    ```
    访问管理页面 → 发布文章
    检查控制台日志
@@ -231,39 +247,41 @@ curl https://your-worker.workers.dev/api/posts > posts-backup.json
 2. **验证删除**
    ```
    刷新首页
-   确认只显示最新的 20 篇
-   第 21 篇应该消失了
+   确认只显示最新的 30 篇
+   第 31 篇应该消失了
    ```
 
 3. **验证新文章存在**
    ```
    最新发布的文章应该显示在顶部
-   旧的 20 篇仍然存在
+   旧的 30 篇仍然存在
    ```
 
 ## 📊 性能对比
 
 ### 清理前（100 篇文章）
 
-- KV 列表操作：~500ms
+- KV/D1 列表操作：~500ms
 - 每次请求：需要读取所有键
 - 存储成本：持续增长
 
-### 清理后（固定 20 篇）
+### 清理后（固定 30 篇）
 
-- KV 列表操作：~100ms（80% ↓）
-- 每次请求：只读取 20 个键
-- 存储成本：固定在 20KB
+- KV/D1 列表操作：~100ms（80% ↓）
+- 每次请求：只读取 30 个键
+- 存储成本：固定在 30KB
 
 ## 🎉 总结
 
 ✅ **自动清理功能已启用**
-✅ **只保留最新的 20 篇文章**
+✅ **只保留最新的 30 篇文章**
 ✅ **超出文章自动删除**
 ✅ **性能大幅提升**
 ✅ **存储成本节约**
+✅ **使用北京时间（Asia/Shanghai）**
+✅ **支持 KV 和 D1 数据库**
 
-现在你的 KV 存储会自动保持最优状态，无需手动管理！
+现在你的 KV/D1 存储会自动保持最优状态，无需手动管理！
 
 ---
 

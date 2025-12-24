@@ -1,3 +1,383 @@
+// Cloudflare D1 适配层
+export class D1Database {
+  constructor(env) {
+    this.env = env;
+    this.db = env.POSTS_D1;
+
+    if (!this.db) {
+      console.error('POSTS_D1 binding not found in environment');
+    }
+  }
+
+  async initialize() {
+    try {
+      console.log('Initializing D1 database...');
+
+      if (!this.db) {
+        throw new Error('D1 database binding (POSTS_D1) is not configured. Please check wrangler.toml');
+      }
+
+      // 测试连接
+      await this.db.prepare('SELECT 1').first();
+
+      console.log('D1 database initialized successfully');
+
+      // 初始化数据库表结构
+      await this.initializeTables();
+    } catch (error) {
+      console.error('Failed to initialize D1 database:', error);
+      throw error;
+    }
+  }
+
+  async initializeTables() {
+    try {
+      // 创建文章表
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          content TEXT,
+          tags TEXT,
+          date TEXT,
+          updated_at TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      // 创建会话表
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          token TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          last_accessed TEXT DEFAULT CURRENT_TIMESTAMP,
+          expires_at TEXT
+        )
+      `);
+
+      // 创建索引优化查询性能
+      await this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_posts_date ON posts (date DESC)
+      `);
+
+      console.log('D1 tables initialized');
+    } catch (error) {
+      console.error('Error initializing D1 tables:', error);
+      throw error;
+    }
+  }
+
+  // 文章相关操作
+  async getAllPosts() {
+    const startTime = Date.now();
+    try {
+      const result = await this.db.prepare(`
+        SELECT id, title, content, tags, date, updated_at as "updatedAt"
+        FROM posts
+        ORDER BY date DESC
+      `).all();
+
+      const duration = Date.now() - startTime;
+      console.log(`Fetched ${result.results.length} posts from D1 in ${duration}ms`);
+
+      return result.results.map(row => ({
+        ...row,
+        tags: row.tags ? JSON.parse(row.tags) : []
+      }));
+    } catch (error) {
+      console.error('Error getting all posts from D1:', error);
+      return [];
+    }
+  }
+
+  async getPost(postId) {
+    try {
+      const result = await this.db.prepare(`
+        SELECT id, title, content, tags, date, updated_at as "updatedAt"
+        FROM posts
+        WHERE id = ?
+      `, [postId]).first();
+
+      if (!result) return null;
+
+      return {
+        ...result,
+        tags: result.tags ? JSON.parse(result.tags) : []
+      };
+    } catch (error) {
+      console.error('Error getting post from D1:', error);
+      return null;
+    }
+  }
+
+  async createPost(postData) {
+    try {
+      const result = await this.db.prepare(`
+        INSERT INTO posts (id, title, content, tags, date)
+        VALUES (?, ?, ?, ?, ?)
+      `, [
+        postData.id,
+        postData.title || '',
+        postData.content,
+        JSON.stringify(postData.tags || []),
+        postData.date
+      ]).run();
+
+      console.log('Created post in D1:', postData.id);
+      return postData;
+    } catch (error) {
+      console.error('Error creating post in D1:', error);
+      throw error;
+    }
+  }
+
+  // 自动清理旧文章，只保留最新的指定数量
+  async cleanupOldPosts(maxPosts = 30) {
+    try {
+      if (!this.db) {
+        console.error('D1 database not available, skipping cleanup');
+        return;
+      }
+
+      console.log('Checking post count in D1, max allowed:', maxPosts);
+
+      // 查询总数
+      const countResult = await this.db.prepare(`
+        SELECT COUNT(*) as count FROM posts
+      `).first();
+      const totalCount = parseInt(countResult.count);
+
+      console.log(`Current post count: ${totalCount}`);
+
+      // 如果超过限制，删除最旧的
+      if (totalCount > maxPosts) {
+        const postsToDelete = totalCount - maxPosts;
+        console.log(`Cleaning up ${postsToDelete} old posts (keeping ${maxPosts} newest)`);
+
+        // 查询要删除的文章 ID（最旧的）
+        const oldPosts = await this.db.prepare(`
+          SELECT id, date FROM posts
+          ORDER BY date ASC
+          LIMIT ?
+        `, [postsToDelete]).all();
+
+        console.log(`Found ${oldPosts.results.length} posts to delete`);
+
+        // 批量删除
+        for (const post of oldPosts.results) {
+          try {
+            await this.db.prepare(`
+              DELETE FROM posts WHERE id = ?
+            `, [post.id]).run();
+            console.log(`Deleted old post: ${post.id} from ${post.date}`);
+          } catch (deleteError) {
+            console.error(`Failed to delete post ${post.id}:`, deleteError);
+          }
+        }
+
+        console.log(`Successfully deleted ${postsToDelete} old posts from D1`);
+      } else {
+        console.log(`Post count (${totalCount}) within limit (${maxPosts}), no cleanup needed`);
+      }
+    } catch (error) {
+      console.error('Error cleaning up old posts in D1:', error);
+      // 不影响文章创建，只是记录错误
+    }
+  }
+
+  async updatePost(postId, updateData) {
+    try {
+      const result = await this.db.prepare(`
+        UPDATE posts
+        SET title = ?, content = ?, tags = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `, [
+        updateData.title || '',
+        updateData.content,
+        JSON.stringify(updateData.tags || []),
+        postId
+      ]).run();
+
+      if (result.meta.changes === 0) return null;
+
+      console.log('Updated post in D1:', postId);
+      return await this.getPost(postId);
+    } catch (error) {
+      console.error('Error updating post in D1:', error);
+      throw error;
+    }
+  }
+
+  async deletePost(postId) {
+    try {
+      const result = await this.db.prepare(`
+        DELETE FROM posts WHERE id = ?
+      `, [postId]).run();
+
+      const deleted = result.meta.changes > 0;
+      console.log(`${deleted ? 'Deleted' : 'Not found'} post in D1: ${postId}`);
+      return deleted;
+    } catch (error) {
+      console.error('Error deleting post from D1:', error);
+      throw error;
+    }
+  }
+
+  // 会话相关操作
+  async createSession(token, username, expiresIn = 604800) {
+    try {
+      const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+
+      await this.db.prepare(`
+        INSERT INTO sessions (token, username, expires_at)
+        VALUES (?, ?, ?)
+      `, [token, username, expiresAt]).run();
+
+      console.log('Created session in D1 for user:', username);
+      return true;
+    } catch (error) {
+      console.error('Error creating session in D1:', error);
+      return false;
+    }
+  }
+
+  async getSession(token) {
+    try {
+      // 清理过期会话
+      await this.cleanupExpiredSessions();
+
+      const result = await this.db.prepare(`
+        SELECT token, username, created_at, last_accessed, expires_at
+        FROM sessions
+        WHERE token = ? AND expires_at > datetime('now')
+      `, [token]).first();
+
+      if (!result) return null;
+
+      // 更新最后访问时间（异步，不阻塞请求）
+      this.db.prepare(`
+        UPDATE sessions
+        SET last_accessed = CURRENT_TIMESTAMP
+        WHERE token = ?
+      `, [token]).run().catch(err => console.error('Error updating last accessed:', err));
+
+      return {
+        username: result.username,
+        createdAt: result.created_at,
+        lastAccessed: result.last_accessed
+      };
+    } catch (error) {
+      console.error('Error getting session from D1:', error);
+      return null;
+    }
+  }
+
+  async updateSession(token, updateData) {
+    try {
+      const result = await this.db.prepare(`
+        UPDATE sessions
+        SET last_accessed = CURRENT_TIMESTAMP
+        WHERE token = ?
+      `, [token]).run();
+
+      return result.meta.changes > 0;
+    } catch (error) {
+      console.error('Error updating session in D1:', error);
+      return false;
+    }
+  }
+
+  async deleteSession(token) {
+    try {
+      const result = await this.db.prepare(`
+        DELETE FROM sessions WHERE token = ?
+      `, [token]).run();
+
+      const deleted = result.meta.changes > 0;
+      console.log(`${deleted ? 'Deleted' : 'Not found'} session in D1: ${token.substring(0, 8)}...`);
+      return deleted;
+    } catch (error) {
+      console.error('Error deleting session from D1:', error);
+      return false;
+    }
+  }
+
+  async cleanupExpiredSessions() {
+    try {
+      const result = await this.db.prepare(`
+        DELETE FROM sessions
+        WHERE expires_at <= datetime('now')
+      `).run();
+
+      if (result.meta.changes > 0) {
+        console.log(`Cleaned up ${result.meta.changes} expired sessions from D1`);
+      }
+
+      return result.meta.changes;
+    } catch (error) {
+      console.error('Error cleaning up sessions in D1:', error);
+      return 0;
+    }
+  }
+
+  // 数据库统计和监控
+  async getStats() {
+    try {
+      const postsResult = await this.db.prepare(`
+        SELECT COUNT(*) as total_posts FROM posts
+      `).first();
+
+      const sessionsResult = await this.db.prepare(`
+        SELECT COUNT(*) as active_sessions
+        FROM sessions
+        WHERE expires_at > datetime('now')
+      `).first();
+
+      const expiredResult = await this.db.prepare(`
+        SELECT COUNT(*) as expired_sessions
+        FROM sessions
+        WHERE expires_at <= datetime('now')
+      `).first();
+
+      return {
+        posts: {
+          total: parseInt(postsResult.total_posts)
+        },
+        sessions: {
+          active: parseInt(sessionsResult.active_sessions),
+          expired: parseInt(expiredResult.expired_sessions)
+        },
+        database: {
+          type: 'cloudflare_d1'
+        }
+      };
+    } catch (error) {
+      console.error('Error getting D1 stats:', error);
+      return null;
+    }
+  }
+
+  // 健康检查
+  async healthCheck() {
+    try {
+      await this.db.prepare('SELECT 1 as health').first();
+
+      return {
+        status: 'healthy',
+        database: 'cloudflare_d1',
+        timestamp: new Date().toISOString()
+      };
+    } catch (error) {
+      return {
+        status: 'unhealthy',
+        error: error.message,
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
+}
+
 // Neon PostgreSQL 适配层
 export class NeonDatabase {
   constructor(env) {
@@ -392,13 +772,17 @@ export class NeonDatabase {
 export function createDatabaseAdapter(env) {
   // 根据环境变量选择数据库类型
   const dbType = env.DATABASE_TYPE || 'kv';
-  
+
   switch (dbType.toLowerCase()) {
+    case 'd1':
+      console.log('Using Cloudflare D1 adapter');
+      return new D1Database(env);
+
     case 'neon':
     case 'postgresql':
       console.log('Using Neon PostgreSQL adapter');
       return new NeonDatabase(env);
-      
+
     case 'kv':
     default:
       console.log('Using KV fallback adapter');
