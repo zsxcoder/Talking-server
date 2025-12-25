@@ -2,6 +2,17 @@ import { getAllPosts, clearPostsCache } from './utils.js';
 import { uploadFile, getFileUrl } from './storage.js';
 import { withSession, createHTMLResponse, createRedirectResponse } from './session-middleware.js';
 import { getThemeToggleHTML, getThemeToggleScript, getThemeCSS } from './theme.js';
+import { MAX_POSTS_TO_KEEP } from './config.js';
+
+// 统一的日期格式化函数 - 使用北京时间
+function formatBeijingDate(date = new Date()) {
+  // 获取北京时间（UTC+8）
+  const beijingOffset = 8 * 60 * 60 * 1000;
+  const beijingTime = new Date(date.getTime() + beijingOffset);
+
+  // 返回统一格式：YYYY-MM-DD HH:mm:ss
+  return beijingTime.toISOString().replace('T', ' ').slice(0, 19);
+}
 
 export async function handleAdmin(request, env, dbWrapper = null) {
   const url = new URL(request.url);
@@ -95,15 +106,16 @@ async function handleLogout(request, env) {
   });
 }
 
-// 自动清理旧文章，只保留最新的指定数量
-async function cleanupOldPosts(kv, maxPosts = 20) {
+// 自动清理旧文章，只保留最新的指定数量（KV 版本）
+async function cleanupOldPosts(kv, maxPosts = MAX_POSTS_TO_KEEP) {
   try {
-    console.log('Checking post count, max allowed:', maxPosts);
-    
+    console.log('=== KV 版本：开始清理旧文章 ===');
+    console.log('最大保留数量:', maxPosts);
+
     // 获取所有文章键
     const list = await kv.list({ prefix: 'post:' });
     const allPosts = [];
-    
+
     // 并行获取所有文章数据
     const promises = list.keys.map(async key => {
       const postData = await kv.get(key.name, 'json');
@@ -111,30 +123,45 @@ async function cleanupOldPosts(kv, maxPosts = 20) {
         allPosts.push({ ...postData, key: key.name });
       }
     });
-    
+
     await Promise.all(promises);
-    
+
     // 按时间排序（最新的在前）
     allPosts.sort((a, b) => new Date(b.date) - new Date(a.date));
-    
+
     // 检查是否需要清理
     if (allPosts.length > maxPosts) {
       const postsToDelete = allPosts.slice(maxPosts);
-      console.log(`Cleaning up ${postsToDelete.length} old posts (keeping ${maxPosts} newest)`);
-      
+      console.log(`需要删除 ${postsToDelete.length} 篇旧文章 (保留最新的 ${maxPosts} 篇)`);
+
+      // 安全检查：最多删除 50 篇
+      const MAX_DELETE_LIMIT = 50;
+      if (postsToDelete.length > MAX_DELETE_LIMIT) {
+        console.warn(`⚠️  删除数量 ${postsToDelete.length} 超过安全限制 ${MAX_DELETE_LIMIT}`);
+      }
+
+      const actualPostsToDelete = postsToDelete.slice(0, MAX_DELETE_LIMIT);
+
+      // 记录即将删除的文章
+      console.log('即将删除的文章:');
+      actualPostsToDelete.forEach((post, index) => {
+        const contentPreview = post.content ? post.content.substring(0, 50) : '(空)';
+        console.log(`  ${index + 1}. ID: ${post.id}, 日期: ${post.date}, 内容: ${contentPreview}...`);
+      });
+
       // 批量删除旧文章
-      const deletePromises = postsToDelete.map(post => {
-        console.log(`Deleting old post: ${post.id} from ${post.date}`);
+      const deletePromises = actualPostsToDelete.map(post => {
         return kv.delete(post.key);
       });
-      
+
       await Promise.all(deletePromises);
-      console.log(`Successfully deleted ${postsToDelete.length} old posts`);
+      console.log(`✅ 成功删除 ${actualPostsToDelete.length} 篇旧文章`);
+      console.log('=== KV 版本：清理完成 ===');
     } else {
-      console.log(`Post count (${allPosts.length}) within limit (${maxPosts}), no cleanup needed`);
+      console.log(`文章数量 ${allPosts.length} 未超过限制 ${maxPosts}，无需清理`);
     }
   } catch (error) {
-    console.error('Error cleaning up old posts:', error);
+    console.error('❌ KV 版本清理旧文章失败:', error);
     // 不影响文章创建，只是记录错误
   }
 }
@@ -146,10 +173,8 @@ async function handleCreatePost(request, env, dbWrapper = null) {
   const image = formData.get('image');
 
   const postId = Date.now().toString();
-  // 使用北京时间（Asia/Shanghai）
-  const now = new Date();
-  const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const date = beijingTime.toISOString().replace('T', ' ').slice(0, 19);
+  // 使用统一的日期格式化函数
+  const date = formatBeijingDate();
 
   let finalContent = content;
 
@@ -200,16 +225,17 @@ async function handleCreatePost(request, env, dbWrapper = null) {
     const currentPosts = await dbWrapper.getAllPosts();
     console.log('Current posts count:', currentPosts.length);
 
-    if (currentPosts.length > 30) {
-      console.log('Cleaning up old posts...');
+    // 使用安全的清理功能，防止误删
+    if (currentPosts.length > MAX_POSTS_TO_KEEP) {
+      console.log('触发安全清理功能...');
       if (dbWrapper.adapter && typeof dbWrapper.adapter.cleanupOldPosts === 'function') {
-        await dbWrapper.adapter.cleanupOldPosts(30);
+        await dbWrapper.adapter.cleanupOldPosts(MAX_POSTS_TO_KEEP);
       }
     }
   } else {
     await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(postData));
-    // KV 自动清理旧文章（只保留最新的30篇）
-    await cleanupOldPosts(env.POSTS_KV, 30);
+    // KV 自动清理旧文章（只保留最新的指定数量）
+    await cleanupOldPosts(env.POSTS_KV, MAX_POSTS_TO_KEEP);
   }
 
   // 清除缓存，确保新文章立即可见
@@ -265,27 +291,23 @@ async function handleUpdatePost(request, env, postId, dbWrapper = null) {
     ...existingPost,
     tags: tags,
     content: finalContent,
-    updatedAt: (() => {
-      const now = new Date();
-      const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-      return beijingTime.toISOString().replace('T', ' ').slice(0, 19);
-    })()
+    updatedAt: formatBeijingDate()
   };
 
   if (dbWrapper) {
     await dbWrapper.updatePost(postId, updatedPost);
     // 获取当前文章数量，仅在超过限制时清理
     const currentPosts = await dbWrapper.getAllPosts();
-    if (currentPosts.length > 30) {
-      console.log('Cleaning up old posts after update...');
+    if (currentPosts.length > MAX_POSTS_TO_KEEP) {
+      console.log('触发安全清理功能（编辑后）...');
       if (dbWrapper.adapter && typeof dbWrapper.adapter.cleanupOldPosts === 'function') {
-        await dbWrapper.adapter.cleanupOldPosts(30);
+        await dbWrapper.adapter.cleanupOldPosts(MAX_POSTS_TO_KEEP);
       }
     }
   } else {
     await env.POSTS_KV.put(`post:${postId}`, JSON.stringify(updatedPost));
-    // KV 自动清理旧文章（只保留最新的30篇）
-    await cleanupOldPosts(env.POSTS_KV, 30);
+    // KV 自动清理旧文章（只保留最新的指定数量）
+    await cleanupOldPosts(env.POSTS_KV, MAX_POSTS_TO_KEEP);
   }
 
   // 清除缓存，确保更新立即可见

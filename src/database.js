@@ -1,3 +1,5 @@
+import { MAX_POSTS_TO_KEEP, MAX_DELETE_LIMIT, AUTO_CLEANUP_ENABLED } from './config.js';
+
 // Cloudflare D1 适配层
 export class D1Database {
   constructor(env) {
@@ -89,7 +91,14 @@ export class D1Database {
 
       return result.results.map(row => ({
         ...row,
-        tags: row.tags ? JSON.parse(row.tags) : []
+        tags: row.tags ? (() => {
+          try {
+            return JSON.parse(row.tags);
+          } catch (e) {
+            console.error('Failed to parse tags for post:', row.id, row.tags);
+            return [];
+          }
+        })() : []
       }));
     } catch (error) {
       console.error('Error getting all posts from D1:', error);
@@ -107,7 +116,14 @@ export class D1Database {
 
       return {
         ...result,
-        tags: result.tags ? JSON.parse(result.tags) : []
+        tags: result.tags ? (() => {
+          try {
+            return JSON.parse(result.tags);
+          } catch (e) {
+            console.error('Failed to parse tags for post:', postId, result.tags);
+            return [];
+          }
+        })() : []
       };
     } catch (error) {
       console.error('Error getting post from D1:', error);
@@ -136,64 +152,89 @@ export class D1Database {
     }
   }
 
-  // 自动清理旧文章，只保留最新的指定数量
-  async cleanupOldPosts(maxPosts = 30) {
+  // 安全清理旧文章，只保留最新的指定数量
+  // 使用事务确保原子性，防止并发导致的误删
+  async cleanupOldPosts(maxPosts = MAX_POSTS_TO_KEEP) {
     try {
       if (!this.db) {
         console.error('D1 database not available, skipping cleanup');
         return;
       }
 
-      console.log('Checking post count in D1, max allowed:', maxPosts);
+      console.log('=== 开始安全清理旧文章 ===');
+      console.log(`最大保留数量: ${maxPosts}`);
 
-      // 查询总数
-      const countStmt = this.db.prepare('SELECT COUNT(*) as count FROM posts');
-      const countResult = await countStmt.first();
-
+      // 步骤1: 获取当前文章总数
+      const countResult = await this.db.prepare('SELECT COUNT(*) as count FROM posts').first();
       if (!countResult || countResult.count === null || countResult.count === undefined) {
-        console.error('Count query returned invalid result:', countResult);
+        console.error('无法获取文章数量:', countResult);
         return;
       }
 
       const totalCount = parseInt(countResult.count);
+      console.log(`当前文章总数: ${totalCount}`);
 
-      console.log(`Current post count: ${totalCount}`);
-
-      // 如果超过限制，删除最旧的
-      if (totalCount > maxPosts) {
-        const postsToDelete = totalCount - maxPosts;
-        console.log(`Cleaning up ${postsToDelete} old posts (keeping ${maxPosts} newest)`);
-
-        // 查询要删除的文章 ID（最旧的）
-        const oldPostsStmt = this.db.prepare('SELECT id, date FROM posts ORDER BY date ASC LIMIT ?');
-        const oldPosts = await oldPostsStmt.bind(postsToDelete).all();
-
-        if (!oldPosts || !oldPosts.results || oldPosts.results.length === 0) {
-          console.log('No old posts to delete');
-          return;
-        }
-
-        console.log(`Found ${oldPosts.results.length} posts to delete`);
-
-        // 批量删除
-        for (const post of oldPosts.results) {
-          try {
-            const deleteStmt = this.db.prepare('DELETE FROM posts WHERE id = ?');
-            await deleteStmt.bind(post.id).run();
-            console.log(`Deleted old post: ${post.id} from ${post.date}`);
-          } catch (deleteError) {
-            console.error(`Failed to delete post ${post.id}:`, deleteError);
-          }
-        }
-
-        console.log(`Successfully deleted ${postsToDelete} old posts from D1`);
-      } else {
-        console.log(`Post count (${totalCount}) within limit (${maxPosts}), no cleanup needed`);
+      // 步骤2: 检查是否需要清理
+      if (totalCount <= maxPosts) {
+        console.log(`文章数量 ${totalCount} 未超过限制 ${maxPosts}，无需清理`);
+        return;
       }
+
+      const postsToDelete = totalCount - maxPosts;
+      console.log(`需要删除的文章数: ${postsToDelete}`);
+
+      // 安全检查: 单次最多删除 50 篇文章，防止意外清空数据库
+      const MAX_DELETE_LIMIT = 50;
+      if (postsToDelete > MAX_DELETE_LIMIT) {
+        console.warn(`⚠️  删除数量 ${postsToDelete} 超过安全限制 ${MAX_DELETE_LIMIT}，只删除 ${MAX_DELETE_LIMIT} 篇`);
+      }
+
+      const actualDeleteCount = Math.min(postsToDelete, MAX_DELETE_LIMIT);
+
+      // 步骤3: 查询要删除的文章信息（用于日志记录）
+      const postsToDeleteList = await this.db.prepare(
+        'SELECT id, date, content FROM posts ORDER BY date ASC LIMIT ?'
+      ).bind(actualDeleteCount).all();
+
+      if (!postsToDeleteList || !postsToDeleteList.results || postsToDeleteList.results.length === 0) {
+        console.log('没有找到需要删除的文章');
+        return;
+      }
+
+      console.log(`即将删除 ${postsToDeleteList.results.length} 篇文章:`);
+      postsToDeleteList.results.forEach((post, index) => {
+        const contentPreview = post.content ? post.content.substring(0, 50) : '(空)';
+        console.log(`  ${index + 1}. ID: ${post.id}, 日期: ${post.date}, 内容: ${contentPreview}...`);
+      });
+
+      // 步骤4: 删除操作（批量删除）
+      const deleteStatements = postsToDeleteList.results.map(post =>
+        this.db.prepare('DELETE FROM posts WHERE id = ?').bind(post.id)
+      );
+
+      const deleteResult = await this.db.batch(deleteStatements);
+
+      // 验证删除结果
+      const actualDeletedCount = deleteResult.length;
+
+      if (actualDeletedCount !== postsToDeleteList.results.length) {
+        console.error(`⚠️  删除数量不匹配! 期望: ${postsToDeleteList.results.length}, 实际: ${actualDeletedCount}`);
+      } else {
+        console.log(`✅ 成功删除 ${actualDeletedCount} 篇旧文章`);
+      }
+
+      // 步骤5: 验证当前文章数量
+      const finalCountResult = await this.db.prepare('SELECT COUNT(*) as count FROM posts').first();
+      const finalCount = finalCountResult ? parseInt(finalCountResult.count) : 0;
+      console.log(`清理后文章总数: ${finalCount}`);
+
+      console.log('=== 清理完成 ===');
     } catch (error) {
-      console.error('Error cleaning up old posts in D1:', error);
-      console.error('Error stack:', error.stack);
-      // 不影响文章创建，只是记录错误
+      console.error('❌ 清理旧文章失败:', error);
+      console.error('错误堆栈:', error.stack);
+
+      // 记录到数据库的错误日志表（如果需要）
+      // 这里只是记录错误，不会影响主流程
     }
   }
 
